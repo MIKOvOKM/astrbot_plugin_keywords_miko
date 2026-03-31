@@ -2,6 +2,7 @@ import sqlite3
 import json
 import threading
 from datetime import datetime
+from astrbot.api import logger
 
 
 class DBHandler:
@@ -46,7 +47,9 @@ class DBHandler:
         """显式释放连接资源"""
         try:
             self.conn.close()
-        except Exception:
+        except Exception as e:
+            from astrbot.api import logger
+            logger.warning(f"关闭数据库连接失败: {e}")
             pass
 
     def count_scope_keywords(self, scope, target):
@@ -96,7 +99,6 @@ class DBHandler:
             try:
                 return json.loads(row['content_json'])
             except (json.JSONDecodeError, TypeError):
-                from astrbot.api import logger
                 logger.error(f"关键字 {kw} 的 content_json 解析失败(脏数据)")
                 return None
 
@@ -175,3 +177,18 @@ class DBHandler:
                 (file_hash, file_path)
             )
 
+    def cleanup_orphan_media(self, deadline):
+        """清理过期且无人引用的媒体文件"""
+        with self._lock:
+            with self.conn:
+                # 查找引用计数为0且在等待列表中超过deadline的媒体
+                cursor = self.conn.execute(
+                    "SELECT hash, file_path FROM media_files "
+                    "WHERE ref_count <= 0 AND in_waitlist = 1 AND waitlist_time < ?",
+                    (deadline,)
+                )
+                to_delete = cursor.fetchall()
+                # 从数据库中删除这些记录
+                for row in to_delete:
+                    self.conn.execute("DELETE FROM media_files WHERE hash = ?", (row['hash'],))
+                return [(row['hash'], row['file_path']) for row in to_delete]

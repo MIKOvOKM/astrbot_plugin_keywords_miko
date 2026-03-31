@@ -131,8 +131,11 @@ class MediaService:
             save_path = os.path.abspath(os.path.join(save_dir, f"{md5}.{ext}"))
 
             def do_copy():
-                os.makedirs(save_dir, exist_ok=True)  # 运行时兜底：防手欠删目录
+                os.makedirs(save_dir, exist_ok=True)
+                # 检查是否是同一个文件
                 if os.path.exists(save_path):
+                    if os.path.samefile(source_path, save_path):
+                        return  # 同一个文件，无需操作
                     os.remove(save_path)
                 shutil.copy2(source_path, save_path)
 
@@ -174,8 +177,9 @@ class MediaService:
             timeout = self.timeout_small if m_type in ("image", "record") else self.timeout_large
             loop = asyncio.get_running_loop()
 
-            if not bot_uid:
-                logger.error("save_forwarded_media 缺失 bot_uid")
+            # 验证 bot_uid 是否合法
+            if not bot_uid or not bot_uid.isdigit():
+                logger.error(f"save_forwarded_media 无效的 bot_uid: {bot_uid}")
                 return None
 
             send_res = await asyncio.wait_for(
@@ -212,6 +216,13 @@ class MediaService:
             local_path = file_info.get("file")
             if not local_path or not await loop.run_in_executor(None, os.path.exists, local_path):
                 return None
+            if max_size > 0:
+                try:
+                    real_size = await loop.run_in_executor(None, os.path.getsize, local_path)
+                    if real_size > max_size:
+                        return {"error": "too_large", "size": real_size}
+                except OSError:
+                    pass
 
             md5 = raw_data.get("md5") or raw_data.get("md5HexStr")
             if not md5:

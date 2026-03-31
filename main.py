@@ -73,17 +73,15 @@ class KeywordPlugin(Star):
         self._bot_uid: str | None = None
         self._bot_name: str | None = None
 
+
     def terminate(self):
         if self._maintenance_handle and not self._maintenance_handle.done():
             self._maintenance_handle.cancel()
-
-        # >>> 增加收集任务的清理 <<<
         for uid, session in self.sessions.items():
             task = session.get("pending_task")
             if task and not task.done():
                 task.cancel()
         self.sessions.clear()
-
         if self.db_h:
             self.db_h.close()
         logger.info("astrbot_plugin_keywords_miko 已安全卸载")
@@ -413,29 +411,19 @@ class KeywordPlugin(Star):
 
             if dead_uids:
                 tasks_to_notify = []
-                for uid in dead_uids:
-                    session_to_clean = self.sessions.pop(uid, None)
-                    self.user_task_locks.pop(uid, None)
-                    if session_to_clean:
-                        kw = session_to_clean.get("kw", "")
-                        umo = session_to_clean.get("umo")
-                        if umo and kw:
-                            tasks_to_notify.append((umo, kw))
-
-            elif timeout_uid:
-                notify_data = None
-                self.adding_lock_user = None
-                session_to_clean = self.sessions.pop(timeout_uid, None)
-                self.user_task_locks.pop(timeout_uid, None)
-                if session_to_clean:
-                    kw = session_to_clean.get("kw", "")
-                    umo = session_to_clean.get("umo")
-                    if umo and kw:
-                        notify_data = (umo, kw)
+                    for uid in dead_uids:
+                        session_to_clean = self.sessions.pop(uid, None)
+                        self.user_task_locks.pop(uid, None)
+                        if session_to_clean:
+                            kw = session_to_clean.get("kw", "")
+                            umo = session_to_clean.get("umo")
+                            if umo and kw:
+                                tasks_to_notify.append((umo, kw))
                 for umo, kw in tasks_to_notify:
-                    asyncio.create_task(self.context.send_message(umo, MessageChain(
-                        [Plain(f"关键字【{kw}】的添加因超时已自动取消")])))
-            elif timeout_uid:
+                    asyncio.create_task(
+                        self.context.send_message(umo, MessageChain([Plain(f"关键字【{kw}】的添加因超时已自动取消")])))
+
+            if timeout_uid:
                 notify_data = None
                 async with self._session_lock:
                     self.adding_lock_user = None
@@ -448,8 +436,8 @@ class KeywordPlugin(Star):
                             notify_data = (umo, kw)
                 if notify_data:
                     umo, kw = notify_data
-                    asyncio.create_task(self.context.send_message(umo, MessageChain(
-                        [Plain(f"关键字【{kw}】的添加因超时已自动取消")])))
+                    asyncio.create_task(
+                        self.context.send_message(umo, MessageChain([Plain(f"关键字【{kw}】的添加因超时已自动取消")])))
         if event.get_platform_name() != "aiocqhttp":
             return
 
@@ -779,42 +767,41 @@ class KeywordPlugin(Star):
                 fid = sd.get("id")
                 if fid is not None:
                     result.append({"type": "face", "id": str(fid)})
-                    elif st in ("image", "record", "video", "file"):
-                    fn = sd.get("file")
-                    url_val = sd.get("url", "")
+            elif st in ("image", "record", "video", "file"):
+                fn = sd.get("file")
+                url_val = sd.get("url", "")
 
-                    need_download = True  # <<< 新增
+                need_download = True  # <<< 新增
 
-                    if isinstance(url_val, str) and url_val.startswith("/"):
-                        url_md5 = None
-                        base_name = os.path.basename(url_val)
-                        name_part, _ = os.path.splitext(base_name)
-                        if len(name_part) == 32:
-                            url_md5 = name_part
-                        if url_md5:
-                            try:
-                                loop = asyncio.get_running_loop()
-                                row = await loop.run_in_executor(None, self.media_s.db.get_media_path, url_md5)
-                                if row and row['file_path']:
-                                    exists = await loop.run_in_executor(None, os.path.exists, row['file_path'])
-                                    if exists:
-                                        session_hashes.append(url_md5)
-                                        result.append({"type": st, "file": row['file_path'], "name": ""})
-                                        need_download = False  # <<< 命中缓存，不需要下载了
-                            except Exception as e:
-                                logger.error(f"本地缓存查库异常: {e}")
+                if isinstance(url_val, str) and url_val.startswith("/"):
+                    url_md5 = None
+                    base_name = os.path.basename(url_val)
+                    name_part, _ = os.path.splitext(base_name)
+                    if len(name_part) == 32:
+                        url_md5 = name_part
+                    if url_md5:
+                        try:
+                            loop = asyncio.get_running_loop()
+                            row = await loop.run_in_executor(None, self.media_s.db.get_media_path, url_md5)
+                            if row and row['file_path']:
+                                exists = await loop.run_in_executor(None, os.path.exists, row['file_path'])
+                                if exists:
+                                    session_hashes.append(url_md5)
+                                    result.append({"type": st, "file": row['file_path'], "name": ""})
+                                    need_download = False  # <<< 命中缓存，不需要下载了
+                        except Exception as e:
+                            logger.error(f"本地缓存查库异常: {e}")
 
-                    if need_download and fn:
-                        r = await self.media_s.save_forwarded_media(bot, st, raw_data=sd, max_size=self.max_file_size,
-                                                                    bot_uid=self._bot_uid)
-                        if isinstance(r, dict) and r.get("error"):
-                            return None
-                        if not r:
-                            return None
-                        session_hashes.append(r["hash"])
-                        result.append({"type": st, "file": r["path"]})
-
-        elif st == "forward":
+                if need_download and fn:
+                    r = await self.media_s.save_forwarded_media(bot, st, raw_data=sd, max_size=self.max_file_size,
+                                                                bot_uid=self._bot_uid)
+                    if isinstance(r, dict) and r.get("error"):
+                        return None
+                    if not r:
+                        return None
+                    session_hashes.append(r["hash"])
+                    result.append({"type": st, "file": r["path"]})
+            elif st == "forward":
                 nested_content = sd.get("content")
                 nested_id = sd.get("id", "")
                 nested_nodes = None
@@ -1181,7 +1168,8 @@ class KeywordPlugin(Star):
                         else:
                             await self._send_collect_notice(bot, gid, uid, f"{m_type} 保存失败，已跳过")
                 except Exception as e:
-                    logger.error(f"{m_type} 保存异常: {traceback.format_exc()}")
+                    item_type = item.get('type', 'unknown')  # 从 item 安全获取类型
+                    logger.error(f"{item_type} 保存异常: {traceback.format_exc()}")
                     await self._send_collect_notice(bot, gid, uid, f"{m_type} 保存异常({type(e).__name__}: {e})，已跳过")
 
             if block:
