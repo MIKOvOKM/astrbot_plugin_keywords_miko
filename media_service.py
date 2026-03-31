@@ -118,10 +118,8 @@ class MediaService:
                 md5 = await loop.run_in_executor(None, self._calculate_md5, source_path)
 
             try:
-                def db_check():
-                    return self.db.conn.execute("SELECT file_path FROM media_files WHERE hash=?", (md5,)).fetchone()
-
-                row = await loop.run_in_executor(None, db_check)
+                # 直接调用带锁的方法，并扔进线程池（不卡主线程，且不绕过锁）
+                row = await loop.run_in_executor(None, self.db.get_media_path, md5)
                 if row and row['file_path'] and await loop.run_in_executor(None, os.path.exists, row['file_path']):
                     return {"hash": md5, "path": row['file_path'], "name": original_name or ""}
             except Exception as e:
@@ -131,15 +129,18 @@ class MediaService:
             ext = ext_map.get(m_type, "dat")
             save_dir = os.path.join(self.media_base, m_type)
             save_path = os.path.abspath(os.path.join(save_dir, f"{md5}.{ext}"))
-            await loop.run_in_executor(None, lambda: os.makedirs(save_dir, exist_ok=True))
-            if await loop.run_in_executor(None, os.path.exists, save_path):
-                await loop.run_in_executor(None, os.remove, save_path)
-            await loop.run_in_executor(None, shutil.copy2, source_path, save_path)
+
+            def do_copy():
+                os.makedirs(save_dir, exist_ok=True)  # 运行时兜底：防手欠删目录
+                if os.path.exists(save_path):
+                    os.remove(save_path)
+                shutil.copy2(source_path, save_path)
+
+            await loop.run_in_executor(None, do_copy)
 
             try:
-                with self.db.conn:
-                    self.db.conn.execute("INSERT OR IGNORE INTO media_files (hash, file_path) VALUES (?, ?)",
-                                         (md5, save_path))
+                # 直接调用带锁的方法，并扔进线程池
+                await loop.run_in_executor(None, self.db.save_media_record, md5, save_path)
             except Exception as e:
                 logger.error(f"写入媒体库异常: {e}")
 
@@ -181,11 +182,19 @@ class MediaService:
                 bot.api.call_action("send_private_msg", user_id=bot_uid, message=cq_str),
                 timeout=timeout
             )
+            # >>> 增加判空保护 <<<
+            if not send_res or not isinstance(send_res, dict):
+                logger.warning(f"保存转发媒体 {m_type} 发送私聊失败，返回值无效")
+                return None
             msg_id = send_res.get("message_id")
             if not msg_id:
                 return None
 
             msg_detail = await asyncio.wait_for(bot.api.call_action("get_msg", message_id=msg_id), timeout=10)
+            # >>> 增加判空保护 <<<
+            if not msg_detail or not isinstance(msg_detail, dict):
+                logger.warning(f"保存转发媒体 {m_type} 获取消息详情失败")
+                return None
             real_file_id = None
             for seg in msg_detail.get("message", []):
                 if seg.get("type") in ("image", "video", "record", "audio", "file"):
@@ -196,8 +205,12 @@ class MediaService:
                 return None
 
             file_info = await asyncio.wait_for(bot.api.call_action("get_file", file=real_file_id), timeout=10)
+            # >>> 增加判空保护 <<<
+            if not file_info or not isinstance(file_info, dict):
+                logger.warning(f"保存转发媒体 {m_type} 获取文件信息失败")
+                return None
             local_path = file_info.get("file")
-            if not local_path or not os.path.exists(local_path):
+            if not local_path or not await loop.run_in_executor(None, os.path.exists, local_path):
                 return None
 
             md5 = raw_data.get("md5") or raw_data.get("md5HexStr")
@@ -205,10 +218,7 @@ class MediaService:
                 md5 = await loop.run_in_executor(None, self._calculate_md5, local_path)
 
             try:
-                def db_check():
-                    return self.db.conn.execute("SELECT file_path FROM media_files WHERE hash=?", (md5,)).fetchone()
-
-                row = await loop.run_in_executor(None, db_check)
+                row = await loop.run_in_executor(None, self.db.get_media_path, md5)
                 if row and row['file_path'] and await loop.run_in_executor(None, os.path.exists, row['file_path']):
                     return {"hash": md5, "path": row['file_path'], "name": ""}
             except Exception as e:
@@ -218,15 +228,17 @@ class MediaService:
             ext = ext_map.get(m_type, "dat")
             save_dir = os.path.join(self.media_base, m_type)
             save_path = os.path.abspath(os.path.join(save_dir, f"{md5}.{ext}"))
-            await loop.run_in_executor(None, lambda: os.makedirs(save_dir, exist_ok=True))
-            if await loop.run_in_executor(None, os.path.exists, save_path):
-                await loop.run_in_executor(None, os.remove, save_path)
-            await loop.run_in_executor(None, shutil.copy2, local_path, save_path)
+
+            def do_copy():
+                os.makedirs(save_dir, exist_ok=True)  # 运行时兜底：防手欠删目录
+                if os.path.exists(save_path):
+                    os.remove(save_path)
+                shutil.copy2(local_path, save_path)
+
+            await loop.run_in_executor(None, do_copy)
 
             try:
-                with self.db.conn:
-                    self.db.conn.execute("INSERT OR IGNORE INTO media_files (hash, file_path) VALUES (?, ?)",
-                                         (md5, save_path))
+                await loop.run_in_executor(None, self.db.save_media_record, md5, save_path)
             except Exception as e:
                 logger.error(f"转发媒体入库异常: {e}")
 
@@ -238,7 +250,7 @@ class MediaService:
             logger.error(f"save_forwarded_media 未知异常: {e}")
             return None
 
-    async def fetch_reply_content(self, bot, message_id, session_hashes):
+    async def fetch_reply_content(self, bot, message_id, session_hashes, max_size=0):
         try:
             # 规范修复：必须加超时控制，防止异常网络挂起
             res = await asyncio.wait_for(bot.api.call_action("get_msg", message_id=message_id), timeout=15)
@@ -275,7 +287,7 @@ class MediaService:
                 elif st in ("image", "record", "video"):
                     fn = sd.get("file") or sd.get("id")
                     if fn:
-                        r = await self.save_media(bot, st, file_name=fn, md5=sd.get("md5") or sd.get("md5HexStr"))
+                        r = await self.save_media(bot, st, file_name=fn, md5=sd.get("md5") or sd.get("md5HexStr"), max_size=max_size)
                         if r and "error" not in r:
                             session_hashes.append(r["hash"])
                             parsed.append({"type": st, "file": r["path"]})
@@ -283,7 +295,7 @@ class MediaService:
                     fid = sd.get("file_id")
                     orig = sd.get("file") or ""
                     if fid:
-                        r = await self.save_media(bot, "file", file_id=fid, original_name=orig)
+                        r = await self.save_media(bot, "file", file_id=fid, original_name=orig, max_size=max_size)
                         if r and "error" not in r:
                             session_hashes.append(r["hash"])
                             parsed.append({"type": "file", "file": r["path"], "name": r.get("name", "")})

@@ -159,3 +159,19 @@ class DBHandler:
                 "WHERE scope='global' ORDER BY id DESC LIMIT 10 OFFSET ?",
                 (offset,)
             ).fetchall()
+        
+    def get_media_path(self, file_hash: str):
+        """线程安全的媒体查重"""
+        with self._lock:
+            return self.conn.execute(
+                "SELECT file_path FROM media_files WHERE hash=?", (file_hash,)
+            ).fetchone()
+
+    def save_media_record(self, file_hash: str, file_path: str):
+        """线程安全的媒体入库"""
+        with self._lock:
+            self.conn.execute(
+                "INSERT OR IGNORE INTO media_files (hash, file_path) VALUES (?, ?)",
+                (file_hash, file_path)
+            )
+

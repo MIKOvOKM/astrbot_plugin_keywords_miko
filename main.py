@@ -39,6 +39,16 @@ class KeywordPlugin(Star):
         if not media_path:
             media_path = os.path.join(self.plugin_dir, "data", "media")
 
+        # >>> 启动预检：一次性创建所有必需的目录（不再在运行时反复检查） <<<
+        try:
+            os.makedirs(os.path.dirname(db_path), exist_ok=True)
+            # 把以后可能用到的所有媒体子目录也一次性建好
+            for sub_dir in ["image", "video", "record", "file"]:
+                os.makedirs(os.path.join(media_path, sub_dir), exist_ok=True)
+            logger.info(f"[关键字回复系统] 数据目录预检完成: {os.path.dirname(db_path)}, {media_path}")
+        except Exception as e:
+            logger.error(f"[关键字回复系统] !!! 致命错误 !!! 无法创建数据目录，请检查 Docker 挂载权限！详情: {e}")
+
         self.db_h = DBHandler(db_path)
         timeout_small = self.config.get("media_timeout_small", 10)
         timeout_large = self.config.get("media_timeout_large", 60)
@@ -64,9 +74,16 @@ class KeywordPlugin(Star):
         self._bot_name: str | None = None
 
     def terminate(self):
-        """生命周期控制：插件卸载/重载时，取消悬挂后台任务并释放DB"""
         if self._maintenance_handle and not self._maintenance_handle.done():
             self._maintenance_handle.cancel()
+
+        # >>> 增加收集任务的清理 <<<
+        for uid, session in self.sessions.items():
+            task = session.get("pending_task")
+            if task and not task.done():
+                task.cancel()
+        self.sessions.clear()
+
         if self.db_h:
             self.db_h.close()
         logger.info("astrbot_plugin_keywords_miko 已安全卸载")
@@ -395,6 +412,7 @@ class KeywordPlugin(Star):
                     None)
 
             if dead_uids:
+                tasks_to_notify = []
                 for uid in dead_uids:
                     session_to_clean = self.sessions.pop(uid, None)
                     self.user_task_locks.pop(uid, None)
@@ -402,9 +420,10 @@ class KeywordPlugin(Star):
                         kw = session_to_clean.get("kw", "")
                         umo = session_to_clean.get("umo")
                         if umo and kw:
-                            asyncio.create_task(self.context.send_message(umo, MessageChain(
-                                [Plain(f"关键字【{kw}】的添加因超时已自动取消")])))
+                            tasks_to_notify.append((umo, kw))
+
             elif timeout_uid:
+                notify_data = None
                 self.adding_lock_user = None
                 session_to_clean = self.sessions.pop(timeout_uid, None)
                 self.user_task_locks.pop(timeout_uid, None)
@@ -412,9 +431,25 @@ class KeywordPlugin(Star):
                     kw = session_to_clean.get("kw", "")
                     umo = session_to_clean.get("umo")
                     if umo and kw:
-                        asyncio.create_task(self.context.send_message(umo, MessageChain(
-                            [Plain(f"关键字【{kw}】的添加因超时已自动取消")])))
-
+                        notify_data = (umo, kw)
+                for umo, kw in tasks_to_notify:
+                    asyncio.create_task(self.context.send_message(umo, MessageChain(
+                        [Plain(f"关键字【{kw}】的添加因超时已自动取消")])))
+            elif timeout_uid:
+                notify_data = None
+                async with self._session_lock:
+                    self.adding_lock_user = None
+                    session_to_clean = self.sessions.pop(timeout_uid, None)
+                    self.user_task_locks.pop(timeout_uid, None)
+                    if session_to_clean:
+                        kw = session_to_clean.get("kw", "")
+                        umo = session_to_clean.get("umo")
+                        if umo and kw:
+                            notify_data = (umo, kw)
+                if notify_data:
+                    umo, kw = notify_data
+                    asyncio.create_task(self.context.send_message(umo, MessageChain(
+                        [Plain(f"关键字【{kw}】的添加因超时已自动取消")])))
         if event.get_platform_name() != "aiocqhttp":
             return
 
@@ -744,45 +779,42 @@ class KeywordPlugin(Star):
                 fid = sd.get("id")
                 if fid is not None:
                     result.append({"type": "face", "id": str(fid)})
-            elif st in ("image", "record", "video"):
-                fn = sd.get("file")
-                url_val = sd.get("url", "")
-                if isinstance(url_val, str) and url_val.startswith("/"):
-                    url_md5 = None
-                    base_name = os.path.basename(url_val)
-                    name_part, _ = os.path.splitext(base_name)
-                    if len(name_part) == 32:
-                        url_md5 = name_part
-                    if url_md5:
-                        try:
-                            loop = asyncio.get_running_loop()
+                    elif st in ("image", "record", "video", "file"):
+                    fn = sd.get("file")
+                    url_val = sd.get("url", "")
 
-                            def db_query():
-                                return self.media_s.db.conn.execute("SELECT file_path FROM media_files WHERE hash=?",
-                                                                    (url_md5,)).fetchone()
+                    need_download = True  # <<< 新增
 
-                            row = await loop.run_in_executor(None, db_query)
-                            if row and row['file_path']:
-                                exists = await loop.run_in_executor(None, os.path.exists, row['file_path'])
-                                if exists:
-                                    session_hashes.append(url_md5)
-                                    result.append({"type": st, "file": row['file_path'], "name": ""})
-                                    continue
-                        except Exception as e:
-                            logger.error(f"本地缓存查库异常: {e}")
-                    return None
-                elif fn:
-                    r = await self.media_s.save_forwarded_media(bot, st, raw_data=sd, max_size=self.max_file_size,
-                                                                bot_uid=self._bot_uid)
-                    if isinstance(r, dict) and r.get("error"):
-                        return None
-                    if not r:
-                        return None
-                    session_hashes.append(r["hash"])
-                    result.append({"type": st, "file": r["path"]})
-            elif st == "file":
-                return None
-            elif st == "forward":
+                    if isinstance(url_val, str) and url_val.startswith("/"):
+                        url_md5 = None
+                        base_name = os.path.basename(url_val)
+                        name_part, _ = os.path.splitext(base_name)
+                        if len(name_part) == 32:
+                            url_md5 = name_part
+                        if url_md5:
+                            try:
+                                loop = asyncio.get_running_loop()
+                                row = await loop.run_in_executor(None, self.media_s.db.get_media_path, url_md5)
+                                if row and row['file_path']:
+                                    exists = await loop.run_in_executor(None, os.path.exists, row['file_path'])
+                                    if exists:
+                                        session_hashes.append(url_md5)
+                                        result.append({"type": st, "file": row['file_path'], "name": ""})
+                                        need_download = False  # <<< 命中缓存，不需要下载了
+                            except Exception as e:
+                                logger.error(f"本地缓存查库异常: {e}")
+
+                    if need_download and fn:
+                        r = await self.media_s.save_forwarded_media(bot, st, raw_data=sd, max_size=self.max_file_size,
+                                                                    bot_uid=self._bot_uid)
+                        if isinstance(r, dict) and r.get("error"):
+                            return None
+                        if not r:
+                            return None
+                        session_hashes.append(r["hash"])
+                        result.append({"type": st, "file": r["path"]})
+
+        elif st == "forward":
                 nested_content = sd.get("content")
                 nested_id = sd.get("id", "")
                 nested_nodes = None
@@ -1039,7 +1071,8 @@ class KeywordPlugin(Star):
 
             if reply_id:
                 try:
-                    reply_data = await self.media_s.fetch_reply_content(bot, reply_id, session_hashes)
+                    reply_data = await self.media_s.fetch_reply_content(bot, reply_id, session_hashes,
+                                                                        max_size=self.max_file_size)
                     if reply_data:
                         block.append({"type": "reply", "id": str(reply_id)})
                         block.extend(reply_data)
@@ -1070,11 +1103,8 @@ class KeywordPlugin(Star):
                             try:
                                 loop = asyncio.get_running_loop()
 
-                                def db_query():
-                                    return self.media_s.db.conn.execute(
-                                        "SELECT file_path FROM media_files WHERE hash=?", (md5,)).fetchone()
+                                row = await loop.run_in_executor(None, self.media_s.db.get_media_path, md5)
 
-                                row = await loop.run_in_executor(None, db_query)
                                 if row and row['file_path']:
                                     exists = await loop.run_in_executor(None, os.path.exists, row['file_path'])
                                     if exists:
@@ -1168,22 +1198,13 @@ class KeywordPlugin(Star):
                 def _do_cleanup():
                     cleanup_days = int(self.config.get("cleanup_interval_days", 7))
                     deadline = datetime.now() - timedelta(days=cleanup_days)
-                    with self.db_h.conn:
-                        rows = self.db_h.conn.execute(
-                            "SELECT hash, file_path FROM media_files WHERE in_waitlist=1 AND waitlist_time < ?",
-                            (deadline,)
-                        ).fetchall()
-                        for r in rows:
-                            fpath = r["file_path"]
-                            if fpath and os.path.exists(fpath):
-                                try:
-                                    os.remove(fpath)
-                                except OSError as e:
-                                    logger.warning(f"清理文件失败 {fpath}: {e}")
-                                self.db_h.conn.execute("DELETE FROM media_files WHERE hash=?", (r["hash"],))
-
-                loop = asyncio.get_running_loop()
-                await loop.run_in_executor(None, _do_cleanup)
+                    to_delete = self.db_h.cleanup_orphan_media(deadline)  # 调用带锁的方法
+                    for hash_val, fpath in to_delete:
+                        if fpath and os.path.exists(fpath):
+                            try:
+                                os.remove(fpath)
+                            except OSError:
+                                pass
             except asyncio.CancelledError:
                 logger.info("后台维护任务已被主动取消")
                 break
