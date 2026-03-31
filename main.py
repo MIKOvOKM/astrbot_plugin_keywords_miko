@@ -1,13 +1,17 @@
 import os
 import time
 import asyncio
+import traceback
 from datetime import datetime, timedelta
+
+from astrbot.api import logger
 from astrbot.api.event import filter, AstrMessageEvent
 from astrbot.api.star import Context, Star, register
 from astrbot.api.message_components import (
     Plain, At, Image, Record, Video, File, Face, Reply
 )
 from astrbot.api.all import MessageChain
+
 from .db_handler import DBHandler
 from .media_service import MediaService
 
@@ -24,11 +28,9 @@ class KeywordPlugin(Star):
     def __init__(self, context: Context, config: dict):
         super().__init__(context)
         self.config = config
-        self.admin_users: set = set(
-            str(u) for u in self.config.get("admin_users", [])
-        )
-        self.plugin_dir = os.path.dirname(os.path.abspath(__file__))
+        self.admin_users: set = set(str(u) for u in self.config.get("admin_users", []))
 
+        self.plugin_dir = os.path.dirname(os.path.abspath(__file__))
         db_path = self.config.get("database_path", "").strip()
         if not db_path:
             db_path = os.path.join(self.plugin_dir, "db", "sqlite.db")
@@ -44,7 +46,7 @@ class KeywordPlugin(Star):
 
         self.adding_lock_user: str | None = None
         self.sessions: dict = {}
-        self._maintenance_started = False
+        self._maintenance_handle = None
 
         self.max_nested_depth: int = self.config.get("max_nested_depth", 3)
         self.max_forward_count: int = self.config.get("max_forward_msg_count", 99)
@@ -54,20 +56,27 @@ class KeywordPlugin(Star):
         self.multi_user_adding: bool = bool(self.config.get("multi_user_adding", False))
         self.maintenance_interval: int = self.config.get("maintenance_interval_seconds", 86400)
 
-
-        # 安全审核：防止同一用户添加时并发写 SQLite 死锁
+        # 安全审核：保护 sessions 的并发读写
         self.user_task_locks: dict[str, asyncio.Lock] = {}
-        # 业务调整：Bot 身份信息懒加载缓存（极少变动，全局获取一次）
+        self._session_lock = asyncio.Lock()
+
         self._bot_uid: str | None = None
         self._bot_name: str | None = None
 
+    def terminate(self):
+        """生命周期控制：插件卸载/重载时，取消悬挂后台任务并释放DB"""
+        if self._maintenance_handle and not self._maintenance_handle.done():
+            self._maintenance_handle.cancel()
+        if self.db_h:
+            self.db_h.close()
+        logger.info("astrbot_plugin_keywords_miko 已安全卸载")
+
     def _ensure_maintenance(self):
-        if not self._maintenance_started:
-            self._maintenance_started = True
+        if not self._maintenance_handle or self._maintenance_handle.done():
             try:
-                asyncio.create_task(self._maintenance_task())
+                self._maintenance_handle = asyncio.create_task(self._maintenance_task())
             except RuntimeError:
-                self._maintenance_started = False
+                pass
 
     async def _ensure_bot_info(self, bot):
         if not self._bot_name:
@@ -75,11 +84,11 @@ class KeywordPlugin(Star):
                 res = await bot.api.call_action("get_login_info")
                 self._bot_uid = str(res.get("user_id", "0"))
                 self._bot_name = res.get("nickname", "Bot")
-            except Exception:
-                pass
+            except Exception as e:
+                logger.error(f"获取Bot信息失败: {e}")
 
     # ==================================================================
-    # 一、指令区 (保持原样)
+    # 一、指令区
     # ==================================================================
     @filter.command("开启群关键字")
     @filter.permission_type(filter.PermissionType.ADMIN)
@@ -97,7 +106,12 @@ class KeywordPlugin(Star):
     @filter.command("关闭群关键字")
     @filter.permission_type(filter.PermissionType.ADMIN)
     async def cmd_disable_group(self, event: AstrMessageEvent):
-        gid = str(event.message_obj.group_id)
+        gid = event.message_obj.group_id
+        # 边界修复：防止私聊触发污染白名单
+        if not gid:
+            yield event.plain_result("此指令仅限群聊使用")
+            return
+        gid = str(gid)
         wl = [i for i in self.config.get("whitelist_groups", []) if str(i) != gid]
         self.config["whitelist_groups"] = wl
         self.config.save_config()
@@ -106,7 +120,11 @@ class KeywordPlugin(Star):
     @filter.command("开启群全局关键字")
     @filter.permission_type(filter.PermissionType.ADMIN)
     async def cmd_enable_global(self, event: AstrMessageEvent):
-        gid = str(event.message_obj.group_id)
+        gid = event.message_obj.group_id
+        if not gid:
+            yield event.plain_result("此指令仅限群聊使用")
+            return
+        gid = str(gid)
         if gid not in [str(i) for i in self.config.get("whitelist_groups", [])]:
             yield event.plain_result(f"{gid} 尚未加入群组白名单，请先开启群关键字")
             return
@@ -119,7 +137,11 @@ class KeywordPlugin(Star):
     @filter.command("关闭群全局关键字")
     @filter.permission_type(filter.PermissionType.ADMIN)
     async def cmd_disable_global(self, event: AstrMessageEvent):
-        gid = str(event.message_obj.group_id)
+        gid = event.message_obj.group_id
+        if not gid:
+            yield event.plain_result("此指令仅限群聊使用")
+            return
+        gid = str(gid)
         gwl = [i for i in self.config.get("global_whitelist_groups", []) if str(i) != gid]
         self.config["global_whitelist_groups"] = gwl
         self.config.save_config()
@@ -141,32 +163,40 @@ class KeywordPlugin(Star):
     @filter.permission_type(filter.PermissionType.ADMIN)
     async def cmd_add(self, event: AstrMessageEvent, keyword: str):
         uid = str(event.message_obj.sender.user_id)
-        if self.multi_user_adding:
-            if uid in self.sessions:
-                yield event.plain_result("你已在添加模式中，请先 /结束添加 或 /取消添加")
-                return
-        else:
-            if self.adding_lock_user:
-                yield event.plain_result(f"管理员 {self.adding_lock_user} 正在添加中，请稍后再试")
-                return
-        kw = keyword.strip().lower()
-        if not kw:
-            yield event.plain_result("关键字不能为空")
-            return
         gid = event.message_obj.group_id
         is_group = bool(gid and str(gid).strip())
         scope = "group" if is_group else "private"
         target = str(gid) if is_group else uid
-        if self.db_h.match_scope_keyword(kw, scope, target) is not None:
+
+        async with self._session_lock:
+            if self.multi_user_adding:
+                if uid in self.sessions:
+                    yield event.plain_result("你已在添加模式中，请先 /结束添加 或 /取消添加")
+                    return
+            else:
+                if self.adding_lock_user:
+                    yield event.plain_result(f"管理员 {self.adding_lock_user} 正在添加中，请稍后再试")
+                    return
+
+        kw = keyword.strip().lower()
+        if not kw:
+            yield event.plain_result("关键字不能为空")
+            return
+
+        loop = asyncio.get_running_loop()
+        if await loop.run_in_executor(None, self.db_h.match_scope_keyword, kw, scope, target) is not None:
             yield event.plain_result(f"关键字【{kw}】已存在，请先删除后再添加")
             return
-        self.sessions[uid] = {
-            "kw": kw, "scope": scope, "target": target,
-            "contents": [], "hashes": [], "last_time": time.time(),
-            "umo": event.unified_msg_origin, "failed": False, "pending_task": None,
-        }
-        if not self.multi_user_adding:
-            self.adding_lock_user = uid
+
+        async with self._session_lock:
+            self.sessions[uid] = {
+                "kw": kw, "scope": scope, "target": target,
+                "contents": [], "hashes": [], "last_time": time.time(),
+                "umo": event.unified_msg_origin, "failed": False, "pending_task": None,
+            }
+            if not self.multi_user_adding:
+                self.adding_lock_user = uid
+
         yield event.plain_result(
             f'正在添加关键字【{kw}】，请发送回复内容'
             f'（支持文本/图片/语音/视频/文件/表情/引用/合并转发），'
@@ -179,39 +209,49 @@ class KeywordPlugin(Star):
             yield event.plain_result("全局关键字只能在私聊中添加")
             return
         uid = str(event.message_obj.sender.user_id)
-        if self.multi_user_adding:
-            if uid in self.sessions:
-                yield event.plain_result("你已在添加模式中，请先 /结束添加 或 /取消添加")
-                return
-        else:
-            if self.adding_lock_user:
-                yield event.plain_result(f"管理员 {self.adding_lock_user} 正在添加中，请稍后再试")
-                return
+
+        async with self._session_lock:
+            if self.multi_user_adding:
+                if uid in self.sessions:
+                    yield event.plain_result("你已在添加模式中，请先 /结束添加 或 /取消添加")
+                    return
+            else:
+                if self.adding_lock_user:
+                    yield event.plain_result(f"管理员 {self.adding_lock_user} 正在添加中，请稍后再试")
+                    return
+
         kw = keyword.strip().lower()
         if not kw:
             yield event.plain_result("关键字不能为空")
             return
-        if self.db_h.match_scope_keyword(kw, "global", "ALL") is not None:
+
+        loop = asyncio.get_running_loop()
+        if await loop.run_in_executor(None, self.db_h.match_scope_keyword, kw, "global", "ALL") is not None:
             yield event.plain_result(f"全局关键字【{kw}】已存在，请先删除后再添加")
             return
-        self.sessions[uid] = {
-            "kw": kw, "scope": "global", "target": "ALL",
-            "contents": [], "hashes": [], "last_time": time.time(),
-            "umo": event.unified_msg_origin, "failed": False, "pending_task": None,
-        }
-        if not self.multi_user_adding:
-            self.adding_lock_user = uid
+
+        async with self._session_lock:
+            self.sessions[uid] = {
+                "kw": kw, "scope": "global", "target": "ALL",
+                "contents": [], "hashes": [], "last_time": time.time(),
+                "umo": event.unified_msg_origin, "failed": False, "pending_task": None,
+            }
+            if not self.multi_user_adding:
+                self.adding_lock_user = uid
+
         yield event.plain_result(f'正在添加全局关键字【{kw}】，请发送回复内容，发送 /结束添加 完成')
 
     @filter.command("结束添加")
     @filter.permission_type(filter.PermissionType.ADMIN)
     async def cmd_finish(self, event: AstrMessageEvent):
         uid = str(event.message_obj.sender.user_id)
-        if uid not in self.sessions:
-            yield event.plain_result("当前不在添加模式")
-            return
 
-        # 安全审核：用排队等锁替代 shield，防止指令假死
+        async with self._session_lock:
+            if uid not in self.sessions:
+                yield event.plain_result("当前不在添加模式")
+                return
+            session = self.sessions[uid]
+
         user_lock = self.user_task_locks.get(uid)
         if user_lock:
             try:
@@ -221,7 +261,6 @@ class KeywordPlugin(Star):
                 yield event.plain_result("上一条消息处理超时，请重试")
                 return
 
-        session = self.sessions[uid]
         if session.get("failed"):
             yield event.plain_result("保存失败或已超限，添加已取消")
         elif not session["contents"]:
@@ -229,37 +268,44 @@ class KeywordPlugin(Star):
         else:
             try:
                 max_kw = self.config.get("max_keywords_per_scope", 50)
-                current = self.db_h.count_scope_keywords(session["scope"], session["target"])
+                loop = asyncio.get_running_loop()
+                current = await loop.run_in_executor(None, self.db_h.count_scope_keywords, session["scope"],
+                                                     session["target"])
                 if current >= max_kw:
                     yield event.plain_result(f"该作用域关键字数量已达上限({max_kw})，无法继续添加")
                 else:
-                    loop = asyncio.get_running_loop()
                     ok = await loop.run_in_executor(
-                        None, self.db_h.save_keyword, session["kw"],
-                        session["scope"], session["target"],
+                        None, self.db_h.save_keyword,
+                        session["kw"], session["scope"], session["target"],
                         session["contents"], uid, session["hashes"])
                     if ok:
                         yield event.plain_result(f'关键字【{session["kw"]}】添加成功')
                     else:
                         yield event.plain_result(f'关键字【{session["kw"]}】已存在，添加失败')
             except Exception as e:
+                logger.error(f"保存关键字异常: {traceback.format_exc()}")
                 yield event.plain_result(f"保存失败: {str(e)}")
 
-        if not self.multi_user_adding:
-            self.adding_lock_user = None
-        self.sessions.pop(uid, None)
-        self.user_task_locks.pop(uid, None)
+        async with self._session_lock:
+            if not self.multi_user_adding:
+                self.adding_lock_user = None
+            self.sessions.pop(uid, None)
+            self.user_task_locks.pop(uid, None)
 
     @filter.command("取消添加")
     @filter.permission_type(filter.PermissionType.ADMIN)
     async def cmd_cancel(self, event: AstrMessageEvent):
         uid = str(event.message_obj.sender.user_id)
-        if uid in self.sessions:
-            kw = self.sessions[uid]["kw"]
-            if not self.multi_user_adding:
-                self.adding_lock_user = None
-            self.sessions.pop(uid, None)
-            yield event.plain_result(f"已取消关键字【{kw}】的添加")
+        async with self._session_lock:
+            if uid in self.sessions:
+                kw = self.sessions[uid]["kw"]
+                if not self.multi_user_adding:
+                    self.adding_lock_user = None
+                self.sessions.pop(uid, None)
+                self.user_task_locks.pop(uid, None)
+                yield event.plain_result(f"已取消关键字【{kw}】的添加")
+                return
+        yield event.plain_result("当前不在添加模式")
 
     @filter.command("删除")
     @filter.permission_type(filter.PermissionType.ADMIN)
@@ -271,9 +317,9 @@ class KeywordPlugin(Star):
         target = str(gid) if is_group else uid
         kw = keyword.strip().lower()
         try:
-            ok = await asyncio.get_running_loop().run_in_executor(
-                None, self.db_h.delete_keyword, kw, scope, target)
+            ok = await asyncio.get_running_loop().run_in_executor(None, self.db_h.delete_keyword, kw, scope, target)
         except Exception as e:
+            logger.error(f"删除关键字异常: {e}")
             yield event.plain_result(f"删除失败: {str(e)}")
             return
         yield event.plain_result(f'关键字【{keyword}】已删除' if ok else f'关键字【{keyword}】不存在')
@@ -283,9 +329,9 @@ class KeywordPlugin(Star):
     async def cmd_delete_global(self, event: AstrMessageEvent, keyword: str):
         kw = keyword.strip().lower()
         try:
-            ok = await asyncio.get_running_loop().run_in_executor(
-                None, self.db_h.delete_keyword, kw, "global", "ALL")
+            ok = await asyncio.get_running_loop().run_in_executor(None, self.db_h.delete_keyword, kw, "global", "ALL")
         except Exception as e:
+            logger.error(f"删除全局关键字异常: {e}")
             yield event.plain_result(f"删除失败: {str(e)}")
             return
         yield event.plain_result(f'全局关键字【{keyword}】已删除' if ok else f'全局关键字【{keyword}】不存在')
@@ -299,11 +345,13 @@ class KeywordPlugin(Star):
         else:
             uid = str(event.message_obj.sender.user_id)
             scope, target, label = "private", uid, "私聊"
-        total = self.db_h.get_total_count(scope, target)
+
+        loop = asyncio.get_running_loop()
+        total = await loop.run_in_executor(None, self.db_h.get_total_count, scope, target)
         if total == 0:
             yield event.plain_result(f"{label}关键字列表为空")
             return
-        rows = self.db_h.list_keywords(scope, target, page)
+        rows = await loop.run_in_executor(None, self.db_h.list_keywords, scope, target, page)
         total_pages = (total + 9) // 10
         body = "\n".join(f"- {r['keyword']}" for r in rows)
         txt = f"{label}关键字列表({page}/{total_pages}):\n{body}"
@@ -313,11 +361,12 @@ class KeywordPlugin(Star):
 
     @filter.command("全局关键字列表")
     async def cmd_list_global(self, event: AstrMessageEvent, page: int = 1):
-        total = self.db_h.get_global_total_count()
+        loop = asyncio.get_running_loop()
+        total = await loop.run_in_executor(None, self.db_h.get_global_total_count)
         if total == 0:
             yield event.plain_result("全局关键字列表为空")
             return
-        rows = self.db_h.list_global_keywords(page)
+        rows = await loop.run_in_executor(None, self.db_h.list_global_keywords, page)
         total_pages = (total + 9) // 10
         body = "\n".join(f"- {r['keyword']} (创建者: {r['creator']})" for r in rows)
         txt = f"全局关键字列表({page}/{total_pages}):\n{body}"
@@ -332,28 +381,30 @@ class KeywordPlugin(Star):
     async def handle_everything(self, event: AstrMessageEvent):
         self._ensure_maintenance()
 
-        # ========== 自动清理超时的 Session ==========
         now = time.time()
-        if self.multi_user_adding:
-            dead_uids = [uid for uid, s in self.sessions.items() if now - s.get("last_time", 0) > self.session_timeout]
-            for uid in dead_uids:
-                session_to_clean = self.sessions.pop(uid, None)
-                self.user_task_locks.pop(uid, None)
-                if session_to_clean:
-                    kw = session_to_clean.get("kw", "")
-                    umo = session_to_clean.get("umo")
-                    if umo and kw:
-                        try:
-                            asyncio.create_task(
-                                self.context.send_message(umo,
-                                                          MessageChain([Plain(f"关键字【{kw}】的添加因超时已自动取消")]))
-                            )
-                        except Exception:
-                            pass
-        else:
-            timeout_uid = next(
-                (uid for uid, s in self.sessions.items() if now - s.get("last_time", 0) > self.session_timeout), None)
-            if timeout_uid:
+        dead_uids = []
+        timeout_uid = None
+
+        async with self._session_lock:
+            if self.multi_user_adding:
+                dead_uids = [uid for uid, s in self.sessions.items() if
+                             now - s.get("last_time", 0) > self.session_timeout]
+            else:
+                timeout_uid = next(
+                    (uid for uid, s in self.sessions.items() if now - s.get("last_time", 0) > self.session_timeout),
+                    None)
+
+            if dead_uids:
+                for uid in dead_uids:
+                    session_to_clean = self.sessions.pop(uid, None)
+                    self.user_task_locks.pop(uid, None)
+                    if session_to_clean:
+                        kw = session_to_clean.get("kw", "")
+                        umo = session_to_clean.get("umo")
+                        if umo and kw:
+                            asyncio.create_task(self.context.send_message(umo, MessageChain(
+                                [Plain(f"关键字【{kw}】的添加因超时已自动取消")])))
+            elif timeout_uid:
                 self.adding_lock_user = None
                 session_to_clean = self.sessions.pop(timeout_uid, None)
                 self.user_task_locks.pop(timeout_uid, None)
@@ -361,55 +412,48 @@ class KeywordPlugin(Star):
                     kw = session_to_clean.get("kw", "")
                     umo = session_to_clean.get("umo")
                     if umo and kw:
-                        try:
-                            asyncio.create_task(
-                                self.context.send_message(umo,
-                                                          MessageChain([Plain(f"关键字【{kw}】的添加因超时已自动取消")]))
-                            )
-                        except Exception:
-                            pass
-        # ===============================================
+                        asyncio.create_task(self.context.send_message(umo, MessageChain(
+                            [Plain(f"关键字【{kw}】的添加因超时已自动取消")])))
 
         if event.get_platform_name() != "aiocqhttp":
             return
+
         uid = str(event.message_obj.sender.user_id)
         gid_raw = event.message_obj.group_id
         gid = str(gid_raw) if (gid_raw and str(gid_raw).strip()) else None
         msg_raw = event.message_str.strip()
+
         if msg_raw.startswith("/"):
             first_word = msg_raw.split()[0].lower()
             if first_word in ("/结束添加", "/取消添加", "/添加", "/添加全局", "/删除", "/删除全局"):
                 return
+
         clean_text = self.media_s.get_clean_text(event.message_obj.message)
 
-        # 判断当前用户是否处于添加模式
-        is_adding = False
-        if self.multi_user_adding:
-            is_adding = uid in self.sessions
-        else:
-            is_adding = (self.adding_lock_user == uid)
+        async with self._session_lock:
+            is_adding = (uid in self.sessions) if self.multi_user_adding else (self.adding_lock_user == uid)
+            session_snapshot = self.sessions.get(uid)
 
-        if is_adding:
-            # 失败后立即清理
-            session = self.sessions.get(uid)
-            if session and session.get("failed"):
-                if not self.multi_user_adding:
-                    self.adding_lock_user = None
-                self.sessions.pop(uid, None)
-                self.user_task_locks.pop(uid, None)
+        if is_adding and session_snapshot:
+            if session_snapshot.get("failed"):
+                async with self._session_lock:
+                    if not self.multi_user_adding:
+                        self.adding_lock_user = None
+                    self.sessions.pop(uid, None)
+                    self.user_task_locks.pop(uid, None)
                 return
             if clean_text in ("结束添加", "取消添加"):
                 return
-            snapshot, reply_id, forward_id, ref_snapshot = self._parse_incoming_message(event)
 
+            snapshot, reply_id, forward_id, ref_snapshot = self._parse_incoming_message(event)
             if snapshot or reply_id or forward_id or ref_snapshot:
-                task = asyncio.create_task(self._collect_task(
-                    event.bot, uid, gid, snapshot, reply_id, forward_id, ref_snapshot))
-                session = self.sessions.get(uid)
-                if session:
-                    session["pending_task"] = task
-            event.stop_event()
-            return
+                task = asyncio.create_task(
+                    self._collect_task(event.bot, uid, gid, snapshot, reply_id, forward_id, ref_snapshot))
+                async with self._session_lock:
+                    if uid in self.sessions:
+                        self.sessions[uid]["pending_task"] = task
+                event.stop_event()
+                return
 
         if gid:
             if gid not in [str(i) for i in self.config.get("whitelist_groups", [])]:
@@ -417,22 +461,27 @@ class KeywordPlugin(Star):
         else:
             if uid not in self.admin_users:
                 return
+
         if not clean_text:
             return
+
+        loop = asyncio.get_running_loop()
         kw_lower = clean_text.lower()
         matched = False
+
         if gid and gid in [str(i) for i in self.config.get("global_whitelist_groups", [])]:
             g_match = await loop.run_in_executor(None, self.db_h.match_scope_keyword, kw_lower, "global", "ALL")
             if g_match:
                 await self._do_send(event, g_match)
                 matched = True
+
         target = gid if gid else uid
         scope = "group" if gid else "private"
-
         l_match = await loop.run_in_executor(None, self.db_h.match_scope_keyword, kw_lower, scope, target)
         if l_match:
             await self._do_send(event, l_match)
             matched = True
+
         if matched:
             event.stop_event()
 
@@ -507,42 +556,43 @@ class KeywordPlugin(Star):
         snapshot: list[dict] = []
         reply_id: str | None = None
         forward_id: str | None = None
-        ref_snapshot: list[dict] = []  # 新增：存放从原生 records 提取的纯MD5字典
+        ref_snapshot: list[dict] = []
 
         raw_elements = self._get_raw_elements(event)
         raw_segs = self._get_raw_ob11_segments(event)
 
-        # ========== 新增：NapCat 丢失 reply 节点的终极兜底 ==========
         has_raw_reply = False
         if raw_elements:
             for elem in raw_elements:
                 if isinstance(elem, dict) and elem.get("elementType") == 7:
                     has_raw_reply = True
                     break
-
         has_ob11_reply = any(isinstance(s, dict) and s.get("type") == "reply" for s in (raw_segs or []))
 
-        # 如果原生有引用，但 OB11 被吞了，我们去 records 里硬抠 MD5
         if has_raw_reply and not has_ob11_reply:
             raw_event = getattr(event, "_raw_event", None) or getattr(event.message_obj, "_raw_event", None)
             records = raw_event.get("records", []) if isinstance(raw_event, dict) else []
             if records and isinstance(records[0], dict):
                 for elem in records[0].get("elements", []):
-                    if not isinstance(elem, dict): continue
+                    if not isinstance(elem, dict):
+                        continue
                     et = elem.get("elementType")
-                    if et == 1:  # 文本
+                    if et == 1:
                         text = (elem.get("textElement") or {}).get("content", "")
-                        if text.strip(): ref_snapshot.append({"type": "text", "val": text})
-                    elif et == 2:  # 图片
+                        if text.strip():
+                            ref_snapshot.append({"type": "text", "val": text})
+                    elif et == 2:
                         md5 = (elem.get("picElement") or {}).get("md5HexStr", "")
-                        if md5: ref_snapshot.append({"type": "media", "m_type": "image", "md5": md5})
-                    elif et == 4:  # 语音
+                        if md5:
+                            ref_snapshot.append({"type": "media", "m_type": "image", "md5": md5})
+                    elif et == 4:
                         md5 = (elem.get("pttElement") or {}).get("md5HexStr", "")
-                        if md5: ref_snapshot.append({"type": "media", "m_type": "record", "md5": md5})
-                    elif et == 5:  # 视频
+                        if md5:
+                            ref_snapshot.append({"type": "media", "m_type": "record", "md5": md5})
+                    elif et == 5:
                         md5 = (elem.get("videoElement") or {}).get("videoMd5", "")
-                        if md5: ref_snapshot.append({"type": "media", "m_type": "video", "md5": md5})
-        # ========== 兜底结束 ==========
+                        if md5:
+                            ref_snapshot.append({"type": "media", "m_type": "video", "md5": md5})
 
         if raw_segs:
             for seg in raw_segs:
@@ -632,15 +682,18 @@ class KeywordPlugin(Star):
                 messages = res["data"].get("messages")
             else:
                 messages = res.get("messages") if isinstance(res, dict) else None
+
             if not isinstance(messages, list):
                 return "api_error"
             if len(messages) > self.max_forward_count:
                 return "count_exceeded"
+
             nodes = await self._process_forward_messages(bot, messages, session_hashes, depth)
             if nodes is None:
                 return "unsupported_type"
             return nodes if nodes else "empty"
-        except Exception:
+        except Exception as e:
+            logger.error(f"获取合并转发异常: {e}")
             return "api_error"
 
     async def _process_forward_messages(self, bot, messages, session_hashes, depth):
@@ -648,14 +701,11 @@ class KeywordPlugin(Star):
             return None
         if not isinstance(messages, list) or len(messages) > self.max_forward_count:
             return None
-
-        await self._ensure_bot_info(bot)  # 确保拿到 Bot 身份
-
+        await self._ensure_bot_info(bot)
         nodes = []
         for msg in messages:
             if not isinstance(msg, dict):
                 continue
-            # 业务调整：强制统一使用 Bot 的身份，不再提取原发送者 uin/name
             content = msg.get("content") or msg.get("message") or []
             if isinstance(content, str):
                 content = MediaService._parse_cq_code(content)
@@ -696,44 +746,32 @@ class KeywordPlugin(Star):
                     result.append({"type": "face", "id": str(fid)})
             elif st in ("image", "record", "video"):
                 fn = sd.get("file")
-                # url 字段可能包含本地绝对路径（如 /app/.config/QQ/.../xxx.mp4）
                 url_val = sd.get("url", "")
-                # 优先拦截：如果 url 是本地绝对路径，直接当本地文件保存，绕开 save_forwarded_media 避免触发框架发送机制
                 if isinstance(url_val, str) and url_val.startswith("/"):
-                    # 从 NapCat 缓存路径提取文件名作为 MD5 (如 5e82e...ab.mp4 -> 5e82e...ab)
                     url_md5 = None
                     base_name = os.path.basename(url_val)
                     name_part, _ = os.path.splitext(base_name)
                     if len(name_part) == 32:
                         url_md5 = name_part
-
                     if url_md5:
                         try:
                             loop = asyncio.get_running_loop()
-                            # 零网络请求，直接查我们的持久化库（必须放入线程池防锁库）！
+
                             def db_query():
-                                return self.media_s.db.conn.execute(
-                                    "SELECT file_path FROM media_files WHERE hash=?", (url_md5,)
-                                ).fetchone()
+                                return self.media_s.db.conn.execute("SELECT file_path FROM media_files WHERE hash=?",
+                                                                    (url_md5,)).fetchone()
 
                             row = await loop.run_in_executor(None, db_query)
-
                             if row and row['file_path']:
-                                # 双重校验：数据库里有记录，且物理文件确实还在
                                 exists = await loop.run_in_executor(None, os.path.exists, row['file_path'])
                                 if exists:
                                     session_hashes.append(url_md5)
-                                    # 和 save_media 的返回值保持绝对一致
                                     result.append({"type": st, "file": row['file_path'], "name": ""})
                                     continue
-                        except Exception:
-                            pass
-
-                    # 走到这里说明：没提取出MD5 / 数据库没查到 / 物理文件已丢失
-                    # 统一视为“过期/损坏”，直接取消添加
+                        except Exception as e:
+                            logger.error(f"本地缓存查库异常: {e}")
                     return None
                 elif fn:
-                    # 没有本地路径的情况下，才走原始逻辑（网络下载）
                     r = await self.media_s.save_forwarded_media(bot, st, raw_data=sd, max_size=self.max_file_size,
                                                                 bot_uid=self._bot_uid)
                     if isinstance(r, dict) and r.get("error"):
@@ -780,9 +818,11 @@ class KeywordPlugin(Star):
                 unsafe.append(block)
             else:
                 safe.append(block)
+
         forward_blocks = list(must_forward)
         threshold = self.forward_threshold
         need_safe_forward = (threshold == 0 or len(safe) > threshold)
+
         if need_safe_forward:
             forward_blocks.extend(safe)
         if forward_blocks:
@@ -797,14 +837,13 @@ class KeywordPlugin(Star):
         bot = event.bot
         api = bot.api
         bot_id, bot_name = self._bot_uid or "0", self._bot_name or "Bot"
-
         ob11_nodes = []
         for block in blocks:
             if not isinstance(block, list) or not block:
                 continue
             is_forward = any(isinstance(s, dict) and s.get("type") == "forward_node" for s in block)
             if is_forward:
-                inner_ob11_nodes = []  # 先把内层节点收集起来
+                inner_ob11_nodes = []
                 for seg in block:
                     if isinstance(seg, dict) and seg.get("type") == "forward_node":
                         for inner_node in seg.get("nodes") or []:
@@ -819,35 +858,23 @@ class KeywordPlugin(Star):
                                             "content": inner_content,
                                         },
                                     })
-                # 将收集到的内层节点，作为一个整体包裹在外层节点里，保持嵌套！
                 if inner_ob11_nodes:
                     ob11_nodes.append({
                         "type": "node",
-                        "data": {
-                            "uin": bot_id,
-                            "name": bot_name,
-                            "content": inner_ob11_nodes,
-                        },
+                        "data": {"uin": bot_id, "name": bot_name, "content": inner_ob11_nodes},
                     })
             else:
                 content = self._segments_to_ob11(block)
                 if content:
                     ob11_nodes.append({
                         "type": "node",
-                        "data": {
-                            "uin": bot_id,
-                            "name": bot_name,
-                            "content": content,
-                        },
+                        "data": {"uin": bot_id, "name": bot_name, "content": content},
                     })
-
         if not ob11_nodes:
             return
 
         gid = event.get_group_id()
         uid = event.get_sender_id()
-
-        # 统一改用 /send_forward_msg，并在最外层给摘要/提示赋值
         try:
             await api.call_action(
                 "send_forward_msg",
@@ -855,25 +882,25 @@ class KeywordPlugin(Star):
                 group_id=int(gid) if gid else None,
                 user_id=int(uid) if uid else None,
                 messages=ob11_nodes,
-                prompt=bot_name,  # 外层卡片“提示”（预览标题）
+                prompt=bot_name,
             )
-        except Exception:
-            # 兼容：如果新接口报错，回退到旧接口（但旧接口可能在部分版本不支持 summary/prompt）
+        except Exception as e:
+            logger.warning(f"send_forward_msg 失败，尝试回退旧接口: {e}")
             try:
                 if gid:
                     await api.call_action("send_group_forward_msg", group_id=int(gid), messages=ob11_nodes)
                 elif uid:
                     await api.call_action("send_private_forward_msg", user_id=int(uid), messages=ob11_nodes)
-            except Exception:
-                pass
+            except Exception as e_fallback:
+                logger.error(f"合并转发回退发送也失败: {e_fallback}")
 
     async def _send_via_normal(self, event, block: list):
         comps = self._to_comps(block)
         if comps:
             try:
                 await self.context.send_message(event.unified_msg_origin, MessageChain(comps))
-            except Exception:
-                pass
+            except Exception as e:
+                logger.error(f"普通消息发送失败: {e}")
 
     def _segments_to_ob11(self, segments):
         result = []
@@ -890,11 +917,8 @@ class KeywordPlugin(Star):
                     if inner_content:
                         result.append({
                             "type": "node",
-                            "data": {
-                                "uin": str(inner.get("uin") or ""),
-                                "name": str(inner.get("name") or ""),
-                                "content": inner_content,
-                            },
+                            "data": {"uin": str(inner.get("uin") or ""), "name": str(inner.get("name") or ""),
+                                     "content": inner_content},
                         })
                 continue
             elif t == "text":
@@ -916,10 +940,8 @@ class KeywordPlugin(Star):
                 result.append({
                     "type": "mface",
                     "data": {
-                        "emoji_id": seg.get("emoji_id", ""),
-                        "key": seg.get("key", ""),
-                        "summary": seg.get("summary", ""),
-                        "emoji_package_id": str(seg.get("emoji_package_id", "")),
+                        "emoji_id": seg.get("emoji_id", ""), "key": seg.get("key", ""),
+                        "summary": seg.get("summary", ""), "emoji_package_id": str(seg.get("emoji_package_id", "")),
                     },
                 })
             elif t == "at":
@@ -951,7 +973,6 @@ class KeywordPlugin(Star):
         return res
 
     async def _send_collect_notice(self, bot, gid, uid, text):
-        """在后台任务中安全地发送提示消息"""
         try:
             params = {"message": [{"type": "text", "data": {"text": text}}]}
             if gid:
@@ -961,30 +982,42 @@ class KeywordPlugin(Star):
                 params["user_id"] = uid
                 params["message_type"] = "private"
             await bot.api.call_action("send_msg", **params)
-        except Exception:
-            pass
+        except Exception as e:
+            logger.error(f"发送收集提示失败: {e}")
 
     # ==================================================================
     # 六、内容收集
     # ==================================================================
     async def _collect_task(self, bot, uid, gid, snapshot, reply_id, forward_id, ref_snapshot=None):
-        session = self.sessions.get(uid)
-        if not session:
-            return
-        # 安全审核：获取用户锁，强制同一用户的添加消息排队串行，杜绝 SQLite 死锁
+        async with self._session_lock:
+            session = self.sessions.get(uid)
+            if not session:
+                return
+
         if uid not in self.user_task_locks:
             self.user_task_locks[uid] = asyncio.Lock()
+
         async with self.user_task_locks[uid]:
-            session["last_time"] = time.time()
+            async with self._session_lock:
+                session = self.sessions.get(uid)
+                if not session:
+                    return
+                session["last_time"] = time.time()
+                session_hashes = session["hashes"]  # >>> 加上这一行，固定引用 <<<
+
             block: list[dict] = []
+
+            # 致命缺陷修复：初始化 m_type 防止下方异常时出现 UnboundLocalError
+            m_type = "unknown"
+
             if forward_id:
-                # 业务调整：提前触发懒加载，确保 bot_uid 可用
                 await self._ensure_bot_info(bot)
                 if not self._bot_uid:
                     await self._send_collect_notice(bot, gid, uid, "获取Bot信息失败，添加已取消")
-                    session["failed"] = True
+                    async with self._session_lock:
+                        if uid in self.sessions: self.sessions[uid]["failed"] = True
                     return
-                result = await self._extract_forward_nodes(bot, forward_id, session["hashes"])
+                result = await self._extract_forward_nodes(bot, forward_id, session_hashes)
                 error_msgs = {
                     "depth_exceeded": "超出嵌套深度限制",
                     "count_exceeded": "超出消息数量限制",
@@ -995,16 +1028,18 @@ class KeywordPlugin(Star):
                 if isinstance(result, str):
                     msg = error_msgs.get(result, "获取合并转发消息失败")
                     await self._send_collect_notice(bot, gid, uid, f"{msg}，添加已取消")
-                    session["failed"] = True
+                    async with self._session_lock:
+                        if uid in self.sessions: self.sessions[uid]["failed"] = True
                     return
                 block.append({"type": "forward_node", "id": str(forward_id), "nodes": result})
                 await self._send_collect_notice(bot, gid, uid, "已记录合并转发内容")
-                session["contents"].append(block)
+                async with self._session_lock:
+                    if uid in self.sessions: self.sessions[uid]["contents"].append(block)
                 return
 
             if reply_id:
                 try:
-                    reply_data = await self.media_s.fetch_reply_content(bot, reply_id, session["hashes"])
+                    reply_data = await self.media_s.fetch_reply_content(bot, reply_id, session_hashes)
                     if reply_data:
                         block.append({"type": "reply", "id": str(reply_id)})
                         block.extend(reply_data)
@@ -1012,14 +1047,16 @@ class KeywordPlugin(Star):
                         await self._send_collect_notice(bot, gid, uid, "已记录引用内容")
                     else:
                         await self._send_collect_notice(bot, gid, uid, "被引用消息不存在或获取失败，添加已取消")
-                        session["failed"] = True
+                        async with self._session_lock:
+                            if uid in self.sessions: self.sessions[uid]["failed"] = True
                         return
                 except Exception as e:
+                    logger.error(f"获取引用异常: {e}")
                     await self._send_collect_notice(bot, gid, uid, f"获取引用异常: {str(e)}，添加已取消")
-                    session["failed"] = True
+                    async with self._session_lock:
+                        if uid in self.sessions: self.sessions[uid]["failed"] = True
                     return
 
-            # ========== 新增：纯靠 MD5 查库的终极复用逻辑 ==========
             elif ref_snapshot:
                 block.append({"type": "text", "data": "【以下为恢复的引用内容】\n"})
                 saved_any = False
@@ -1032,27 +1069,28 @@ class KeywordPlugin(Star):
                         if md5:
                             try:
                                 loop = asyncio.get_running_loop()
+
                                 def db_query():
                                     return self.media_s.db.conn.execute(
-                                        "SELECT file_path FROM media_files WHERE hash=?", (md5,)
-                                    ).fetchone()
-                                row = await loop.run_in_executor(None, db_query)  # >>> 加上这行 <<<
+                                        "SELECT file_path FROM media_files WHERE hash=?", (md5,)).fetchone()
+
+                                row = await loop.run_in_executor(None, db_query)
                                 if row and row['file_path']:
                                     exists = await loop.run_in_executor(None, os.path.exists, row['file_path'])
                                     if exists:
                                         block.append({"type": item["m_type"], "file": row['file_path']})
-                                        session["hashes"].append(md5)
+                                        session_hashes.append(md5)  # >>> 改动 <<<
                                         saved_any = True
-                            except Exception:
-                                pass
+                            except Exception as e:
+                                logger.error(f"MD5恢复引用异常: {e}")
                 if saved_any:
                     block.append({"type": "text", "data": "\n—————这是回复消息—————\n"})
                     await self._send_collect_notice(bot, gid, uid, "已记录引用内容(通过本地缓存恢复)")
                 else:
                     await self._send_collect_notice(bot, gid, uid, "被引用消息已过期且本地无缓存，添加已取消")
-                    session["failed"] = True
+                    async with self._session_lock:
+                        if uid in self.sessions: self.sessions[uid]["failed"] = True
                     return
-            # ===============================================
 
             for item in snapshot:
                 try:
@@ -1068,10 +1106,12 @@ class KeywordPlugin(Star):
                                 if int(ob11_size) > self.max_file_size:
                                     await self._send_collect_notice(bot, gid, uid,
                                                                     f"{m_type} 文件大小超过限制，添加已取消")
-                                    session["failed"] = True
+                                    async with self._session_lock:
+                                        if uid in self.sessions: self.sessions[uid]["failed"] = True
                                     return
                             except (ValueError, TypeError):
                                 pass
+
                         lp = item.get("local_path", "")
                         if lp:
                             try:
@@ -1080,10 +1120,12 @@ class KeywordPlugin(Star):
                                 if fsize > self.max_file_size:
                                     await self._send_collect_notice(bot, gid, uid,
                                                                     f"{m_type} 文件大小({fsize}字节)超过限制，添加已取消")
-                                    session["failed"] = True
+                                    async with self._session_lock:
+                                        if uid in self.sessions: self.sessions[uid]["failed"] = True
                                     return
                             except OSError:
                                 pass
+
                         orig_name = None
                         if m_type == "file":
                             orig_name = item.get("id") or None
@@ -1096,28 +1138,30 @@ class KeywordPlugin(Star):
                             fsize = r.get("size", 0)
                             await self._send_collect_notice(bot, gid, uid,
                                                             f"{m_type} 文件大小({fsize}字节)超过限制，添加已取消")
-                            session["failed"] = True
+                            async with self._session_lock:
+                                if uid in self.sessions: self.sessions[uid]["failed"] = True
                             return
                         elif r and "error" not in r:
                             saved = {"type": m_type, "file": r["path"]}
                             if m_type == "file" and r.get("name"):
                                 saved["name"] = r["name"]
                             block.append(saved)
-                            session["hashes"].append(r["hash"])
+                            session_hashes.append(r["hash"])  # >>> 改动 <<<
                             await self._send_collect_notice(bot, gid, uid, f"已存入 {m_type}")
                         else:
                             await self._send_collect_notice(bot, gid, uid, f"{m_type} 保存失败，已跳过")
                 except Exception as e:
-                    import traceback
-                    traceback.print_exc()
+                    logger.error(f"{m_type} 保存异常: {traceback.format_exc()}")
                     await self._send_collect_notice(bot, gid, uid, f"{m_type} 保存异常({type(e).__name__}: {e})，已跳过")
+
             if block:
-                session["contents"].append(block)
+                async with self._session_lock:
+                    if uid in self.sessions:
+                        self.sessions[uid]["contents"].append(block)
 
-
-# ==================================================================
-# 七、后台维护
-# ==================================================================
+    # ==================================================================
+    # 七、后台维护
+    # ==================================================================
     async def _maintenance_task(self):
         while True:
             try:
@@ -1127,16 +1171,26 @@ class KeywordPlugin(Star):
                     with self.db_h.conn:
                         rows = self.db_h.conn.execute(
                             "SELECT hash, file_path FROM media_files WHERE in_waitlist=1 AND waitlist_time < ?",
-                            (deadline,)).fetchall()
+                            (deadline,)
+                        ).fetchall()
                         for r in rows:
                             fpath = r["file_path"]
                             if fpath and os.path.exists(fpath):
-                                os.remove(fpath)
-                            self.db_h.conn.execute("DELETE FROM media_files WHERE hash=?", (r["hash"],))
+                                try:
+                                    os.remove(fpath)
+                                except OSError as e:
+                                    logger.warning(f"清理文件失败 {fpath}: {e}")
+                                self.db_h.conn.execute("DELETE FROM media_files WHERE hash=?", (r["hash"],))
 
                 loop = asyncio.get_running_loop()
                 await loop.run_in_executor(None, _do_cleanup)
-            except Exception:
-                pass
-            await asyncio.sleep(self.maintenance_interval)
+            except asyncio.CancelledError:
+                logger.info("后台维护任务已被主动取消")
+                break
+            except Exception as e:
+                logger.error(f"后台维护任务执行异常: {e}")
 
+            try:
+                await asyncio.sleep(self.maintenance_interval)
+            except asyncio.CancelledError:
+                break
