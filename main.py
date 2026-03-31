@@ -73,7 +73,6 @@ class KeywordPlugin(Star):
         self._bot_uid: str | None = None
         self._bot_name: str | None = None
 
-
     def terminate(self):
         if self._maintenance_handle and not self._maintenance_handle.done():
             self._maintenance_handle.cancel()
@@ -411,14 +410,14 @@ class KeywordPlugin(Star):
 
             if dead_uids:
                 tasks_to_notify = []
-                    for uid in dead_uids:
-                        session_to_clean = self.sessions.pop(uid, None)
-                        self.user_task_locks.pop(uid, None)
-                        if session_to_clean:
-                            kw = session_to_clean.get("kw", "")
-                            umo = session_to_clean.get("umo")
-                            if umo and kw:
-                                tasks_to_notify.append((umo, kw))
+                for uid in dead_uids:
+                    session_to_clean = self.sessions.pop(uid, None)
+                    self.user_task_locks.pop(uid, None)
+                    if session_to_clean:
+                        kw = session_to_clean.get("kw", "")
+                        umo = session_to_clean.get("umo")
+                        if umo and kw:
+                            tasks_to_notify.append((umo, kw))
                 for umo, kw in tasks_to_notify:
                     asyncio.create_task(
                         self.context.send_message(umo, MessageChain([Plain(f"关键字【{kw}】的添加因超时已自动取消")])))
