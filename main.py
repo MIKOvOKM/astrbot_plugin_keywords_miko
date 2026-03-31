@@ -22,7 +22,7 @@ MEDIA_DOWNLOAD_TYPES = frozenset({"image", "record", "video", "file"})
     "astrbot_plugin_keywords_miko",
     "MIKOvOKM",
     "关键字回复系统",
-    "1.0.0",
+    "1.0.1",
 )
 class KeywordPlugin(Star):
     def __init__(self, context: Context, config: dict):
