@@ -1,0 +1,6 @@
+name: astrbot_plugin_keywords_miko
+display_name: 关键字回复系统
+desc: 简易使用，支持多类型添加，持久化媒体文件内容，若设置不当注意存储空间爆炸。
+version: v1.0.0
+author: MIKOvOKM
+repo: https://github.com/MIKOvOKM/astrbot_plugin_keywords_miko

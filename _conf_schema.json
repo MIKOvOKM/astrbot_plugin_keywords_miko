@@ -1,0 +1,126 @@
+{
+  "multi_user_adding": {
+    "type": "bool",
+    "description": "多用户同时添加模式",
+    "hint": "默认为关闭，单用户互斥（同时只能有一个人添加）模式。开启后允许多个管理员同时在各自的会话中添加不同的关键字，互不干扰。默认关闭。（未测试功能，若异常请关闭）",
+    "default": false
+  },
+  "admin_users": {
+    "type": "list",
+    "description": "管理员ID列表",
+    "hint": "重要配置，未配置时无法管理插件的增删和权限管理。多个QQ号用逗号分隔。",
+    "items": {
+      "type": "int"
+    },
+    "default": []
+  },
+  "whitelist_groups": {
+    "type": "list",
+    "description": "群组白名单（初始值）",
+    "hint": "在此列表中的群组启用关键字回复功能，后续可通过命令动态添加/移除。多个群号用逗号分隔。",
+    "items": {
+      "type": "int"
+    },
+    "default": []
+  },
+  "global_whitelist_groups": {
+    "type": "list",
+    "description": "全局关键字白名单群组（初始值）",
+    "hint": "在此列表中的群组可触发全局关键字，后续可通过命令动态添加/移除。多个群号用逗号分隔。",
+    "items": {
+      "type": "int"
+    },
+    "default": []
+  },
+  "session_timeout_seconds": {
+    "type": "int",
+    "description": "添加关键字会话的超时时间（秒）",
+    "hint": "如果管理员在添加模式下超过此时间未发送任何有效内容，系统将自动取消本次添加，防止占用资源。默认为300秒（5分钟）。修改请填写具体秒数。",
+    "default": 600,
+    "min": 60,
+    "max": 86400
+  },
+  "max_keywords_per_scope": {
+    "type": "int",
+    "description": "每个作用域（群聊/私聊/全局）可添加的关键字数量上限",
+    "hint": "达到上限后无法继续添加，防止滥用。",
+    "default": 50,
+    "min": 1,
+    "max": 500
+  },
+  "forward_threshold": {
+    "type": "int",
+    "description": "触发合并转发发送的消息条数阈值",
+    "hint": "当添加的回复内容条数超过此值时，触发时以合并转发形式发送。设为0则始终使用合并转发。不支持合并转发的内容类型（如文件、语音）将始终以普通消息发送。",
+    "default": 3,
+    "min": 0,
+    "max": 100
+  },
+  "max_nested_depth": {
+    "type": "int",
+    "description": "合并转发消息的最大嵌套层数",
+    "hint": "默认值为3，不建议设置过大，超过此深度的合并转发将被拒绝，防止性能爆炸。",
+    "default": 3,
+    "min": 1,
+    "max": 10
+  },
+  "max_forward_msg_count": {
+    "type": "int",
+    "description": "合并转发消息中包含的最大消息条数",
+    "hint": "默认值为99，不建议设置过大，超过设置数量的合并转发将被拒绝。",
+    "default": 99,
+    "min": 1,
+    "max": 500
+  },
+  "max_file_size": {
+    "type": "int",
+    "description": "单个媒体文件的最大大小（字节）",
+    "hint": "默认值为2G，不建议设置过大，超过此大小的文件将被拒绝保存。修改填入具体字节。",
+    "default": 2147483648,
+    "min": 1048576
+  },
+  "media_timeout_small": {
+    "type": "int",
+    "description": "图片/语音下载超时时间（秒）",
+    "hint": "在处理合并转发等需要触发下载的场景时，图片和语音的最长等待时间。超时将安全放弃，防止NapCat卡死。建议根据网络环境设置，100M宽带建议10秒。",
+    "default": 10,
+    "min": 3,
+    "max": 60
+  },
+  "media_timeout_large": {
+    "type": "int",
+    "description": "视频/文件下载超时时间（秒）",
+    "hint": "在处理合并转发等需要触发下载的场景时，视频和文件的最长等待时间。超时将安全放弃，防止NapCat卡死。建议根据网络环境和大文件频率设置，100M宽带建议60秒。",
+    "default": 60,
+    "min": 10,
+    "max": 300
+  },
+  "database_path": {
+    "type": "string",
+    "description": "SQLite数据库.db文件的路径",
+    "hint": "持久化插件重要配置和关键字的数据库路径，如 /data/xxx.db。默认留空时使用插件目录下的 data 文件夹。如需修改，建议填入绝对路径，UNC路径请自行尝试。配置错误会导致插件无法使用。",
+    "default": ""
+  },
+  "media_storage_path": {
+    "type": "string",
+    "description": "媒体文件存储根目录",
+    "hint": "持久化媒体文件的目录路径，默认留空时使用插件目录下的 data/media 文件夹。如需修改，建议填入绝对路径，UNC路径请自行尝试。配置错误会导致插件异常。",
+    "default": ""
+  },
+  "cleanup_interval_days": {
+    "type": "int",
+    "description": "媒体文件自动清理周期（天）",
+    "hint": "引用计数为0的媒体文件将在等待该天数后被删除。",
+    "default": 7,
+    "min": 1,
+    "max": 30
+  },
+  "maintenance_interval_seconds": {
+    "type": "int",
+    "description": "后台垃圾回收扫描间隔（秒）",
+    "hint": "后台自动清理未被任何关键字引用的“孤儿图片/视频”的扫描间隔时间。默认86400秒（1天）。不建议设置过小以免频繁读取磁盘影响性能。",
+    "default": 86400,
+    "min": 1800,
+    "max": 604800
+  }
+}
