@@ -71,7 +71,7 @@ class KeywordPlugin(Star):
         self._bot_uid: str | None = None
         self._bot_name: str | None = None
 
-    def terminate(self):
+    async def terminate(self):
         if self._maintenance_handle and not self._maintenance_handle.done():
             self._maintenance_handle.cancel()
         for uid, session in self.sessions.items():
