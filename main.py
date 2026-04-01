@@ -50,9 +50,10 @@ class KeywordPlugin(Star):
             logger.error(f"[关键字回复系统] !!! 致命错误 !!! 无法创建数据目录，请检查 Docker 挂载权限！详情: {e}")
 
         self.db_h = DBHandler(db_path)
-        timeout_small = self.config.get("media_timeout_small", 10)
-        timeout_large = self.config.get("media_timeout_large", 60)
-        self.media_s = MediaService(media_path, self.db_h, timeout_small, timeout_large)
+        timeout_small = int(self.config.get("media_timeout_small", 10))
+        timeout_large = int(self.config.get("media_timeout_large", 60))
+        download_wait = int(self.config.get("media_download_wait_timeout", 60))
+        self.media_s = MediaService(media_path, self.db_h, timeout_small, timeout_large, download_wait)
 
         self.adding_lock_user: str | None = None
         self.sessions: dict = {}
@@ -1117,27 +1118,32 @@ class KeywordPlugin(Star):
                     elif item["type"] == "media":
                         m_type = item["m_type"]
                         ob11_size = item.get("file_size")
+                        expected_size = 0
+
                         if ob11_size:
                             try:
-                                if int(ob11_size) > self.max_file_size:
+                                expected_size = int(ob11_size)
+                                if expected_size > self.max_file_size:
                                     await self._send_collect_notice(bot, gid, uid,
                                                                     f"{m_type} 文件大小超过限制，添加已取消")
                                     async with self._session_lock:
-                                        if uid in self.sessions: self.sessions[uid]["failed"] = True
+                                        if uid in self.sessions:
+                                            self.sessions[uid]["failed"] = True
                                     return
                             except (ValueError, TypeError):
                                 pass
 
                         lp = item.get("local_path", "")
-                        if lp:
+                        if lp and expected_size == 0:
                             try:
                                 loop = asyncio.get_running_loop()
-                                fsize = await loop.run_in_executor(None, os.path.getsize, lp)
-                                if fsize > self.max_file_size:
+                                expected_size = await loop.run_in_executor(None, os.path.getsize, lp)
+                                if expected_size > self.max_file_size:
                                     await self._send_collect_notice(bot, gid, uid,
-                                                                    f"{m_type} 文件大小({fsize}字节)超过限制，添加已取消")
+                                                                    f"{m_type} 文件大小({expected_size}字节)超过限制，添加已取消")
                                     async with self._session_lock:
-                                        if uid in self.sessions: self.sessions[uid]["failed"] = True
+                                        if uid in self.sessions:
+                                            self.sessions[uid]["failed"] = True
                                     return
                             except OSError:
                                 pass
@@ -1148,14 +1154,22 @@ class KeywordPlugin(Star):
                         r = await self.media_s.save_media(
                             bot, m_type, file_name=item.get("id"), file_id=item.get("file_id"),
                             local_path=item.get("local_path"), md5=item.get("md5") or item.get("local_md5"),
-                            original_name=orig_name, max_size=self.max_file_size)
+                            original_name=orig_name, max_size=self.max_file_size,
+                            expected_size=expected_size)
 
                         if isinstance(r, dict) and r.get("error") == "too_large":
                             fsize = r.get("size", 0)
                             await self._send_collect_notice(bot, gid, uid,
                                                             f"{m_type} 文件大小({fsize}字节)超过限制，添加已取消")
                             async with self._session_lock:
-                                if uid in self.sessions: self.sessions[uid]["failed"] = True
+                                if uid in self.sessions:
+                                    self.sessions[uid]["failed"] = True
+                            return
+                        elif isinstance(r, dict) and r.get("error") == "download_timeout":
+                            await self._send_collect_notice(bot, gid, uid, f"{m_type} 文件下载超时，添加已取消")
+                            async with self._session_lock:
+                                if uid in self.sessions:
+                                    self.sessions[uid]["failed"] = True
                             return
                         elif r and "error" not in r:
                             saved = {"type": m_type, "file": r["path"]}

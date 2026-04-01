@@ -79,9 +79,16 @@
     "default": 2147483648,
     "min": 1048576
   },
+  "media_download_wait_timeout": {
+  "type": "int",
+  "description": "保存媒体文件(特别是视频)时，等待媒体下载完成的最大超时时间，默认60(秒)。超时将自动取消本次添加。",
+  "default": 60,
+    "min": 10,
+    "max": 300
+  },
   "media_timeout_small": {
     "type": "int",
-    "description": "图片/语音下载超时时间（秒）",
+    "description": "图片/语音请求超时时间（秒）",
     "hint": "在处理合并转发等需要触发下载的场景时，图片和语音的最长等待时间。超时将安全放弃，防止NapCat卡死。建议根据网络环境设置，100M宽带建议10秒。",
     "default": 10,
     "min": 3,
@@ -89,7 +96,7 @@
   },
   "media_timeout_large": {
     "type": "int",
-    "description": "视频/文件下载超时时间（秒）",
+    "description": "视频/文件请求超时时间（秒）",
     "hint": "在处理合并转发等需要触发下载的场景时，视频和文件的最长等待时间。超时将安全放弃，防止NapCat卡死。建议根据网络环境和大文件频率设置，100M宽带建议60秒。",
     "default": 60,
     "min": 10,
