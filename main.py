@@ -1,14 +1,11 @@
-import os
-import time
-import asyncio
-import traceback
+import os, time, asyncio, traceback, random
 from datetime import datetime, timedelta
 
 from astrbot.api import logger
 from astrbot.api.event import filter, AstrMessageEvent
 from astrbot.api.star import Context, Star, register
 from astrbot.api.message_components import (
-    Plain, At, Image, Record, Video, File, Face, Reply
+    Plain, At, Image, Record, Video, File, Face
 )
 from astrbot.api.all import MessageChain
 
@@ -468,10 +465,10 @@ class KeywordPlugin(Star):
             if clean_text in ("结束添加", "取消添加"):
                 return
 
-            snapshot, reply_id, forward_id, ref_snapshot = self._parse_incoming_message(event)
-            if snapshot or reply_id or forward_id or ref_snapshot:
+            snapshot, forward_id = self._parse_incoming_message(event)
+            if snapshot or forward_id:
                 task = asyncio.create_task(
-                    self._collect_task(event.bot, uid, gid, snapshot, reply_id, forward_id, ref_snapshot))
+                    self._collect_task(event.bot, uid, gid, snapshot, forward_id))
                 async with self._session_lock:
                     if uid in self.sessions:
                         self.sessions[uid]["pending_task"] = task
@@ -577,45 +574,10 @@ class KeywordPlugin(Star):
 
     def _parse_incoming_message(self, event: AstrMessageEvent):
         snapshot: list[dict] = []
-        reply_id: str | None = None
         forward_id: str | None = None
-        ref_snapshot: list[dict] = []
 
         raw_elements = self._get_raw_elements(event)
         raw_segs = self._get_raw_ob11_segments(event)
-
-        has_raw_reply = False
-        if raw_elements:
-            for elem in raw_elements:
-                if isinstance(elem, dict) and elem.get("elementType") == 7:
-                    has_raw_reply = True
-                    break
-        has_ob11_reply = any(isinstance(s, dict) and s.get("type") == "reply" for s in (raw_segs or []))
-
-        if has_raw_reply and not has_ob11_reply:
-            raw_event = getattr(event, "_raw_event", None) or getattr(event.message_obj, "_raw_event", None)
-            records = raw_event.get("records", []) if isinstance(raw_event, dict) else []
-            if records and isinstance(records[0], dict):
-                for elem in records[0].get("elements", []):
-                    if not isinstance(elem, dict):
-                        continue
-                    et = elem.get("elementType")
-                    if et == 1:
-                        text = (elem.get("textElement") or {}).get("content", "")
-                        if text.strip():
-                            ref_snapshot.append({"type": "text", "val": text})
-                    elif et == 2:
-                        md5 = (elem.get("picElement") or {}).get("md5HexStr", "")
-                        if md5:
-                            ref_snapshot.append({"type": "media", "m_type": "image", "md5": md5})
-                    elif et == 4:
-                        md5 = (elem.get("pttElement") or {}).get("md5HexStr", "")
-                        if md5:
-                            ref_snapshot.append({"type": "media", "m_type": "record", "md5": md5})
-                    elif et == 5:
-                        md5 = (elem.get("videoElement") or {}).get("videoMd5", "")
-                        if md5:
-                            ref_snapshot.append({"type": "media", "m_type": "video", "md5": md5})
 
         if raw_segs:
             for seg in raw_segs:
@@ -627,12 +589,19 @@ class KeywordPlugin(Star):
                     sdata = {}
                 if stype == "forward":
                     forward_id = sdata.get("id")
-                elif stype == "reply":
-                    reply_id = sdata.get("id")
                 elif stype == "text":
                     val = sdata.get("text", "")
                     if val and val.strip():
                         snapshot.append({"type": "text", "val": val})
+                # ── 商城表情拦截 ──
+                elif stype == "image" and sdata.get("emoji_id") and sdata.get("key"):
+                    snapshot.append({
+                        "type": "mface",
+                        "emoji_package_id": int(sdata.get("emoji_package_id", 0) or 0),
+                        "emoji_id": str(sdata.get("emoji_id", "")),
+                        "key": str(sdata.get("key", "")),
+                        "summary": str(sdata.get("summary", "")),
+                    })
                 elif stype in MEDIA_DOWNLOAD_TYPES:
                     if stype == "file":
                         fid = sdata.get("file_id")
@@ -643,9 +612,11 @@ class KeywordPlugin(Star):
                     if fn or fid:
                         lp, lm = self._get_local_media_info(stype, raw_elements)
                         snapshot.append({
-                            "type": "media", "m_type": stype, "id": fn, "file_id": fid,
+                            "type": "media", "m_type": stype,
+                            "id": fn, "file_id": fid,
                             "md5": sdata.get("md5") or sdata.get("md5HexStr"),
-                            "local_path": lp, "local_md5": lm, "file_size": sdata.get("file_size"),
+                            "local_path": lp, "local_md5": lm,
+                            "file_size": sdata.get("file_size"),
                         })
                 elif stype == "face":
                     face_id = sdata.get("id")
@@ -663,35 +634,48 @@ class KeywordPlugin(Star):
                     if val:
                         snapshot.append({"type": "text", "val": val})
                 elif isinstance(comp, Image) and comp.file:
-                    lp, lm = self._get_local_media_info("image", raw_elements)
-                    snapshot.append({"type": "media", "m_type": "image", "id": comp.file, "file_id": None,
-                                     "md5": getattr(comp, "md5", None), "local_path": lp, "local_md5": lm,
-                                     "file_size": None})
+                    extra = getattr(comp, 'extra', None) or {}
+                    eid = extra.get("emoji_id")
+                    ekey = extra.get("key")
+                    if eid and ekey:
+                        snapshot.append({
+                            "type": "mface",
+                            "emoji_package_id": int(extra.get("emoji_package_id", 0) or 0),
+                            "emoji_id": str(eid), "key": str(ekey),
+                            "summary": str(extra.get("summary", "")),
+                        })
+                    else:
+                        lp, lm = self._get_local_media_info("image", raw_elements)
+                        snapshot.append({"type": "media", "m_type": "image",
+                            "id": comp.file, "file_id": None,
+                            "md5": getattr(comp, "md5", None),
+                            "local_path": lp, "local_md5": lm, "file_size": None})
                 elif isinstance(comp, Record) and comp.file:
                     lp, lm = self._get_local_media_info("record", raw_elements)
-                    snapshot.append({"type": "media", "m_type": "record", "id": comp.file, "file_id": None,
-                                     "md5": getattr(comp, "md5", None), "local_path": lp, "local_md5": lm,
-                                     "file_size": None})
+                    snapshot.append({"type": "media", "m_type": "record",
+                        "id": comp.file, "file_id": None,
+                        "md5": getattr(comp, "md5", None),
+                        "local_path": lp, "local_md5": lm, "file_size": None})
                 elif isinstance(comp, Video) and comp.file:
                     lp, lm = self._get_local_media_info("video", raw_elements)
-                    snapshot.append({"type": "media", "m_type": "video", "id": comp.file, "file_id": None,
-                                     "md5": getattr(comp, "md5", None), "local_path": lp, "local_md5": lm,
-                                     "file_size": None})
+                    snapshot.append({"type": "media", "m_type": "video",
+                        "id": comp.file, "file_id": None,
+                        "md5": getattr(comp, "md5", None),
+                        "local_path": lp, "local_md5": lm, "file_size": None})
                 elif isinstance(comp, File) and comp.file:
                     lp, lm = self._get_local_media_info("file", raw_elements)
-                    snapshot.append({"type": "media", "m_type": "file", "id": comp.file, "file_id": None,
-                                     "md5": getattr(comp, "md5", None), "local_path": lp, "local_md5": lm,
-                                     "file_size": None})
+                    snapshot.append({"type": "media", "m_type": "file",
+                        "id": comp.file, "file_id": None,
+                        "md5": getattr(comp, "md5", None),
+                        "local_path": lp, "local_md5": lm, "file_size": None})
                 elif isinstance(comp, Face):
                     snapshot.append({"type": "face", "id": str(comp.id)})
                 elif isinstance(comp, At):
                     qq = getattr(comp, "qq", None) or getattr(comp, "target", None)
                     if qq:
                         snapshot.append({"type": "text", "val": f"@{qq} "})
-                elif isinstance(comp, Reply):
-                    reply_id = getattr(comp, "id", None) or getattr(comp, "message_id", None)
 
-        return snapshot, reply_id, forward_id, ref_snapshot
+        return snapshot, forward_id
 
     # ==================================================================
     # 四、合并转发提取（递归）
@@ -767,6 +751,14 @@ class KeywordPlugin(Star):
                 fid = sd.get("id")
                 if fid is not None:
                     result.append({"type": "face", "id": str(fid)})
+            elif st == "mface":
+                result.append({
+                    "type": "mface",
+                    "emoji_id": sd.get("emoji_id", ""),
+                    "key": sd.get("key", ""),
+                    "summary": sd.get("summary", ""),
+                    "emoji_package_id": sd.get("emoji_package_id", 0),
+                })
             elif st in ("image", "record", "video", "file"):
                 fn = sd.get("file")
                 url_val = sd.get("url", "")
@@ -825,7 +817,6 @@ class KeywordPlugin(Star):
         if not self._bot_name:
             await self._ensure_bot_info(event.bot)
         bot_id, bot_name = self._bot_uid or "0", self._bot_name or "Bot"
-
         must_forward = []
         safe = []
         unsafe = []
@@ -837,20 +828,27 @@ class KeywordPlugin(Star):
                 unsafe.append(block)
             else:
                 safe.append(block)
-
         forward_blocks = list(must_forward)
         threshold = self.forward_threshold
         need_safe_forward = (threshold == 0 or len(safe) > threshold)
-
         if need_safe_forward:
             forward_blocks.extend(safe)
+
+        first_sent = False
         if forward_blocks:
             await self._send_via_forward(event, forward_blocks)
+            first_sent = True
         if not need_safe_forward:
             for block in safe:
+                if first_sent:
+                    await asyncio.sleep(random.uniform(1.0, 2.0))
                 await self._send_via_normal(event, block)
+                first_sent = True
         for block in unsafe:
+            if first_sent:
+                await asyncio.sleep(random.uniform(1.0, 2.0))
             await self._send_via_normal(event, block)
+            first_sent = True
 
     async def _send_via_forward(self, event, blocks: list):
         bot = event.bot
@@ -914,6 +912,28 @@ class KeywordPlugin(Star):
                 logger.error(f"合并转发回退发送也失败: {e_fallback}")
 
     async def _send_via_normal(self, event, block: list):
+        has_mface = any(isinstance(i, dict) and i.get("type") == "mface" for i in block)
+
+        if has_mface:
+            # >>> 如果有商城表情，绕过 AstrBot 的 MessageChain，直接调用底层 OneBot API <<<
+            try:
+                ob11_msg = self._segments_to_ob11(block)
+                if ob11_msg:
+                    gid = event.get_group_id()
+                    uid = event.get_sender_id()
+                    params = {"message": ob11_msg}
+                    if gid:
+                        params["group_id"] = int(gid)
+                        params["message_type"] = "group"
+                    else:
+                        params["user_id"] = int(uid) if uid else None
+                        params["message_type"] = "private"
+                    await event.bot.api.call_action("send_msg", **params)
+                return
+            except Exception as e:
+                logger.error(f"商城表情已过期或下架: {e}")
+                return
+
         comps = self._to_comps(block)
         if comps:
             try:
@@ -953,8 +973,6 @@ class KeywordPlugin(Star):
                 if seg.get("name"):
                     d["data"]["name"] = seg["name"]
                 result.append(d)
-            elif t == "reply":
-                result.append({"type": "text", "data": {"text": "【引用了一条历史消息】\n"}})
             elif t == "mface":
                 result.append({
                     "type": "mface",
@@ -987,8 +1005,6 @@ class KeywordPlugin(Star):
             elif t == "file":
                 name = i.get("name", "") or os.path.basename(f)
                 res.append(File(file=f, name=name))
-            elif t == "reply":
-                res.append(Reply(id=str(i.get("id", ""))))
         return res
 
     async def _send_collect_notice(self, bot, gid, uid, text):
@@ -1007,7 +1023,7 @@ class KeywordPlugin(Star):
     # ==================================================================
     # 六、内容收集
     # ==================================================================
-    async def _collect_task(self, bot, uid, gid, snapshot, reply_id, forward_id, ref_snapshot=None):
+    async def _collect_task(self, bot, uid, gid, snapshot, forward_id):
         async with self._session_lock:
             session = self.sessions.get(uid)
             if not session:
@@ -1056,65 +1072,20 @@ class KeywordPlugin(Star):
                     if uid in self.sessions: self.sessions[uid]["contents"].append(block)
                 return
 
-            if reply_id:
-                try:
-                    reply_data = await self.media_s.fetch_reply_content(bot, reply_id, session_hashes,
-                                                                        max_size=self.max_file_size)
-                    if reply_data:
-                        block.append({"type": "reply", "id": str(reply_id)})
-                        block.extend(reply_data)
-                        block.append({"type": "text", "data": "\n—————这是回复消息—————\n"})
-                        await self._send_collect_notice(bot, gid, uid, "已记录引用内容")
-                    else:
-                        await self._send_collect_notice(bot, gid, uid, "被引用消息不存在或获取失败，添加已取消")
-                        async with self._session_lock:
-                            if uid in self.sessions: self.sessions[uid]["failed"] = True
-                        return
-                except Exception as e:
-                    logger.error(f"获取引用异常: {e}")
-                    await self._send_collect_notice(bot, gid, uid, f"获取引用异常: {str(e)}，添加已取消")
-                    async with self._session_lock:
-                        if uid in self.sessions: self.sessions[uid]["failed"] = True
-                    return
-
-            elif ref_snapshot:
-                block.append({"type": "text", "data": "【以下为恢复的引用内容】\n"})
-                saved_any = False
-                for item in ref_snapshot:
-                    if item["type"] == "text":
-                        block.append({"type": "text", "data": item["val"]})
-                        saved_any = True
-                    elif item["type"] == "media":
-                        md5 = item.get("md5")
-                        if md5:
-                            try:
-                                loop = asyncio.get_running_loop()
-
-                                row = await loop.run_in_executor(None, self.media_s.db.get_media_path, md5)
-
-                                if row and row['file_path']:
-                                    exists = await loop.run_in_executor(None, os.path.exists, row['file_path'])
-                                    if exists:
-                                        block.append({"type": item["m_type"], "file": row['file_path']})
-                                        session_hashes.append(md5)  # >>> 改动 <<<
-                                        saved_any = True
-                            except Exception as e:
-                                logger.error(f"MD5恢复引用异常: {e}")
-                if saved_any:
-                    block.append({"type": "text", "data": "\n—————这是回复消息—————\n"})
-                    await self._send_collect_notice(bot, gid, uid, "已记录引用内容(通过本地缓存恢复)")
-                else:
-                    await self._send_collect_notice(bot, gid, uid, "被引用消息已过期且本地无缓存，添加已取消")
-                    async with self._session_lock:
-                        if uid in self.sessions: self.sessions[uid]["failed"] = True
-                    return
-
             for item in snapshot:
                 try:
                     if item["type"] == "text":
                         block.append({"type": "text", "data": item["val"]})
                     elif item["type"] == "face":
                         block.append({"type": "face", "id": item["id"]})
+                    elif item["type"] == "mface":
+                        block.append({
+                            "type": "mface",
+                            "emoji_id": item.get("emoji_id", ""),
+                            "key": item.get("key", ""),
+                            "summary": item.get("summary", ""),
+                            "emoji_package_id": item.get("emoji_package_id", 0),
+                        })
                     elif item["type"] == "media":
                         m_type = item["m_type"]
                         ob11_size = item.get("file_size")
