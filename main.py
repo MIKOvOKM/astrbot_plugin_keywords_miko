@@ -70,6 +70,7 @@ class KeywordPlugin(Star):
         self._session_lock = asyncio.Lock()
         self._bot_uid: str | None = None
         self._bot_name: str | None = None
+        self._global_send_lock = asyncio.Lock()
 
     async def terminate(self):
         if self._maintenance_handle and not self._maintenance_handle.done():
@@ -814,17 +815,21 @@ class KeywordPlugin(Star):
             await self._ensure_bot_info(event.bot)
         bot_id, bot_name = self._bot_uid or "0", self._bot_name or "Bot"
 
-        must_forward = []
-        safe = []
-        unsafe = []
-        for block in match_data:
-            types = {s.get("type") for s in block if isinstance(s, dict)}
-            if "forward_node" in types:
-                must_forward.append(block)
-            elif types & {"file", "record"}:
-                unsafe.append(block)
-            else:
-                safe.append(block)
+        async with self._global_send_lock:
+            # 如果前面有别的群在发，这里会等待。拿到锁后，主动睡一下，拉开时间差
+            await asyncio.sleep(random.uniform(0.5, 1.5))
+
+            must_forward = []
+            safe = []
+            unsafe = []
+            for block in match_data:
+                types = {s.get("type") for s in block if isinstance(s, dict)}
+                if "forward_node" in types:
+                    must_forward.append(block)
+                elif types & {"file", "record"}:
+                    unsafe.append(block)
+                else:
+                    safe.append(block)
 
         forward_blocks = list(must_forward)
         threshold = self.forward_threshold
@@ -977,7 +982,7 @@ class KeywordPlugin(Star):
             elif t == "mface":
                 result.append({
                     "type": "mface", "data": {
-                        "emoji_id": seg.get("emoji_id", ""), "key": seg.get("key", ""),
+                        "emoji_id": seg.get("emoji_id", ""),
                         "summary": seg.get("summary", ""), "emoji_package_id": str(seg.get("emoji_package_id", "")),
                     },
                 })
