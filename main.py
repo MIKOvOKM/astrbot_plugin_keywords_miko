@@ -436,7 +436,6 @@ class KeywordPlugin(Star):
                     asyncio.create_task(
                         self.context.send_message(umo, MessageChain([Plain(f"关键字【{kw}】的添加因超时已自动取消")])))
 
-            # C-001 修复：删除了此处原有的内层 async with self._session_lock，防止死锁
             if timeout_uid:
                 notify_data = None
                 self.adding_lock_user = None
@@ -447,11 +446,14 @@ class KeywordPlugin(Star):
                     umo = session_to_clean.get("umo")
                     if umo and kw:
                         notify_data = (umo, kw)
-
-            if notify_data:
-                umo, kw = notify_data
-                asyncio.create_task(
-                    self.context.send_message(umo, MessageChain([Plain(f"关键字【{kw}】的添加因超时已自动取消")])))
+                if notify_data:
+                    umo, kw = notify_data
+                    asyncio.create_task(
+                        self.context.send_message(
+                            umo,
+                            MessageChain([Plain(f"关键字【{kw}】的添加因超时已自动取消")])
+                        )
+                    )
 
         if event.get_platform_name() != "aiocqhttp":
             return
