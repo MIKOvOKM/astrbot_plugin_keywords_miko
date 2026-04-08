@@ -6,20 +6,24 @@ from astrbot.api import logger
 
 
 class DBHandler:
-    def __init__(self, db_path: str):
+    def __init__(self, db_path: str, enable_wal: bool = True):
         self.conn = sqlite3.connect(db_path, check_same_thread=False)
         self.conn.row_factory = sqlite3.Row
-        # 安全审核：引入线程锁，强制跨线程/线程池的串行访问，解决并发一致性风险
         self._lock = threading.Lock()
-        self._init_db()
+        self._init_db(enable_wal)
 
-    def _init_db(self):
+    def _init_db(self, enable_wal: bool):
         with self._lock:
             with self.conn:
-                self.conn.execute("PRAGMA journal_mode=WAL")
+                # H-004: 增加配置控制，修复潜在的NFS兼容问题
+                if enable_wal:
+                    self.conn.execute("PRAGMA journal_mode=WAL")
+                else:
+                    self.conn.execute("PRAGMA journal_mode=DELETE")
+
                 self.conn.execute("PRAGMA synchronous=NORMAL")
                 self.conn.execute("PRAGMA busy_timeout=5000")
-                # 安全审核：增加 UNIQUE 约束，从数据库层面杜绝并发竞态导致的重复关键字
+
                 self.conn.execute(
                     "CREATE TABLE IF NOT EXISTS keywords ("
                     "id INTEGER PRIMARY KEY AUTOINCREMENT, "
@@ -44,13 +48,10 @@ class DBHandler:
                 )
 
     def close(self):
-        """显式释放连接资源"""
         try:
             self.conn.close()
         except Exception as e:
-            from astrbot.api import logger
             logger.warning(f"关闭数据库连接失败: {e}")
-            pass
 
     def count_scope_keywords(self, scope, target):
         with self._lock:
@@ -64,7 +65,6 @@ class DBHandler:
         t_str = str(target).strip()
         with self._lock:
             with self.conn:
-                # INSERT OR IGNORE 配合 UNIQUE 约束，天然防并发重复，无需先查后插
                 cursor = self.conn.execute(
                     "INSERT OR IGNORE INTO keywords "
                     "(keyword, scope, target_id, content_json, creator, created_at) "
@@ -72,7 +72,7 @@ class DBHandler:
                     (kw.lower(), scope, t_str, json.dumps(content, ensure_ascii=False), str(creator), datetime.now())
                 )
                 if cursor.rowcount == 0:
-                    return False  # 已存在被忽略
+                    return False
 
                 kw_id = cursor.lastrowid
                 for h in set(hashes):
@@ -88,14 +88,14 @@ class DBHandler:
     def match_scope_keyword(self, kw, scope, target):
         with self._lock:
             t_str = str(target).strip()
+            # M-001 修复：去除 CAST，利用索引加速查询
             row = self.conn.execute(
                 "SELECT content_json FROM keywords "
-                "WHERE keyword=? AND scope=? AND CAST(target_id AS TEXT) = CAST(? AS TEXT)",
+                "WHERE keyword=? AND scope=? AND target_id=?",
                 (kw.lower(), scope, t_str)
             ).fetchone()
             if not row:
                 return None
-            # 异常隔离：防止脏数据导致 json.loads 崩溃拖垮主链路
             try:
                 return json.loads(row['content_json'])
             except (json.JSONDecodeError, TypeError):
@@ -108,9 +108,10 @@ class DBHandler:
             return False
         with self._lock:
             with self.conn:
+                # M-001 修复：去除 CAST
                 row = self.conn.execute(
                     "SELECT id FROM keywords "
-                    "WHERE keyword=? AND scope=? AND CAST(target_id AS TEXT) = CAST(? AS TEXT)",
+                    "WHERE keyword=? AND scope=? AND target_id=?",
                     (kw.lower(), scope, t_str)
                 ).fetchone()
                 if not row:
@@ -146,7 +147,6 @@ class DBHandler:
     def list_keywords(self, scope, target, page):
         with self._lock:
             offset = (max(1, page) - 1) * 10
-            # 规范修复：分页必须指定 ORDER BY，否则结果顺序随机导致翻页重复/遗漏
             return self.conn.execute(
                 "SELECT keyword FROM keywords "
                 "WHERE scope=? AND target_id=? ORDER BY id DESC LIMIT 10 OFFSET ?",
@@ -161,16 +161,14 @@ class DBHandler:
                 "WHERE scope='global' ORDER BY id DESC LIMIT 10 OFFSET ?",
                 (offset,)
             ).fetchall()
-        
+
     def get_media_path(self, file_hash: str):
-        """线程安全的媒体查重"""
         with self._lock:
             return self.conn.execute(
                 "SELECT file_path FROM media_files WHERE hash=?", (file_hash,)
             ).fetchone()
 
     def save_media_record(self, file_hash: str, file_path: str):
-        """线程安全的媒体入库"""
         with self._lock:
             self.conn.execute(
                 "INSERT OR IGNORE INTO media_files (hash, file_path) VALUES (?, ?)",
@@ -178,17 +176,13 @@ class DBHandler:
             )
 
     def cleanup_orphan_media(self, deadline):
-        """清理过期且无人引用的媒体文件"""
         with self._lock:
             with self.conn:
-                # 查找引用计数为0且在等待列表中超过deadline的媒体
                 cursor = self.conn.execute(
                     "SELECT hash, file_path FROM media_files "
-                    "WHERE ref_count <= 0 AND in_waitlist = 1 AND waitlist_time < ?",
-                    (deadline,)
+                    "WHERE ref_count <= 0 AND in_waitlist = 1 AND waitlist_time < ?", (deadline,)
                 )
                 to_delete = cursor.fetchall()
-                # 从数据库中删除这些记录
                 for row in to_delete:
                     self.conn.execute("DELETE FROM media_files WHERE hash = ?", (row['hash'],))
                 return [(row['hash'], row['file_path']) for row in to_delete]

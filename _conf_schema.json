@@ -80,9 +80,9 @@
     "min": 1048576
   },
   "media_download_wait_timeout": {
-  "type": "int",
-  "description": "保存媒体文件(特别是视频)时，等待媒体下载完成的最大超时时间，默认60(秒)。超时将自动取消本次添加。",
-  "default": 60,
+    "type": "int",
+    "description": "保存媒体文件(特别是视频)时，等待媒体下载完成的最大超时时间，默认60(秒)。超时将自动取消本次添加。",
+    "default": 60,
     "min": 10,
     "max": 300
   },
@@ -107,6 +107,12 @@
     "description": "SQLite数据库.db文件的路径",
     "hint": "持久化插件重要配置和关键字的数据库路径，如 /data/xxx.db。默认留空时使用插件目录下的 data 文件夹。如需修改，建议填入绝对路径，UNC路径请自行尝试。配置错误会导致插件无法使用。",
     "default": ""
+  },
+  "enable_wal_mode": {
+    "type": "bool",
+    "description": "是否启用 SQLite WAL 模式",
+    "hint": "WAL 模式可提升并发读写性能。但在某些特殊网络文件系统(如NFS挂载)下可能导致数据库锁定异常，遇到问题时可尝试关闭。默认开启。",
+    "default": true
   },
   "media_storage_path": {
     "type": "string",
