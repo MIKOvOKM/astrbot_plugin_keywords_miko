@@ -78,8 +78,10 @@ class KeywordPlugin(Star):
         for uid, session in self.sessions.items():
             task = session.get("pending_task")
             timeout_task = session.get("timeout_task")
-            if task and not task.done(): task.cancel()
-            if timeout_task and not timeout_task.done(): timeout_task.cancel()
+            if task and not task.done():
+                task.cancel()
+            if timeout_task and not timeout_task.done():
+                timeout_task.cancel()
         self.sessions.clear()
         if self.db_h:
             self.db_h.close()
@@ -103,7 +105,8 @@ class KeywordPlugin(Star):
 
     @staticmethod
     def _safe_int(val) -> int | None:
-        if not val: return None
+        if not val:
+            return None
         try:
             return int(val)
         except (ValueError, TypeError):
@@ -122,19 +125,20 @@ class KeywordPlugin(Star):
             session = self.sessions.pop(uid, None)
             if not session:
                 return
+
             kw = session.get("kw", "")
             umo = session.get("umo")
             if not self.multi_user_adding:
                 self.adding_lock_user = None
             self.user_task_locks.pop(uid, None)
 
-        if umo and kw:
-            try:
-                await self.context.send_message(
-                    umo, MessageChain([Plain(f"关键字【{kw}】的添加因超时已自动取消")])
-                )
-            except Exception as e:
-                logger.error(f"发送超时取消通知失败: {e}")
+            if umo and kw:
+                try:
+                    await self.context.send_message(
+                        umo, MessageChain([Plain(f"关键字【{kw}】的添加因超时已自动取消")])
+                    )
+                except Exception as e:
+                    logger.error(f"发送超时取消通知失败: {e}")
 
     # ==================================================================
     # 一、指令区
@@ -244,9 +248,15 @@ class KeywordPlugin(Star):
 
             timeout_task = asyncio.create_task(self._start_session_timeout(uid))
             self.sessions[uid] = {
-                "kw": kw, "scope": scope, "target": target,
-                "contents": [], "hashes": [], "last_time": time.time(),
-                "umo": event.unified_msg_origin, "failed": False, "pending_task": None,
+                "kw": kw,
+                "scope": scope,
+                "target": target,
+                "contents": [],
+                "hashes": [],
+                "last_time": time.time(),
+                "umo": event.unified_msg_origin,
+                "failed": False,
+                "pending_task": None,
                 "timeout_task": timeout_task,
             }
             if not self.multi_user_adding:
@@ -262,6 +272,7 @@ class KeywordPlugin(Star):
         if event.message_obj.group_id:
             yield event.plain_result("全局关键字只能在私聊中添加")
             return
+
         uid = str(event.message_obj.sender.user_id)
         kw = keyword.strip().lower()
         if not kw:
@@ -286,9 +297,15 @@ class KeywordPlugin(Star):
 
             timeout_task = asyncio.create_task(self._start_session_timeout(uid))
             self.sessions[uid] = {
-                "kw": kw, "scope": "global", "target": "ALL",
-                "contents": [], "hashes": [], "last_time": time.time(),
-                "umo": event.unified_msg_origin, "failed": False, "pending_task": None,
+                "kw": kw,
+                "scope": "global",
+                "target": "ALL",
+                "contents": [],
+                "hashes": [],
+                "last_time": time.time(),
+                "umo": event.unified_msg_origin,
+                "failed": False,
+                "pending_task": None,
                 "timeout_task": timeout_task,
             }
             if not self.multi_user_adding:
@@ -300,13 +317,14 @@ class KeywordPlugin(Star):
     @filter.permission_type(filter.PermissionType.ADMIN)
     async def cmd_finish(self, event: AstrMessageEvent):
         uid = str(event.message_obj.sender.user_id)
+
         async with self._session_lock:
             if uid not in self.sessions:
                 yield event.plain_result("当前不在添加模式")
                 return
             session = self.sessions[uid]
-            user_lock = self.user_task_locks.get(uid)
 
+        user_lock = self.user_task_locks.get(uid)
         if user_lock:
             try:
                 await asyncio.wait_for(user_lock.acquire(), timeout=60.0)
@@ -320,6 +338,7 @@ class KeywordPlugin(Star):
             if not session:
                 yield event.plain_result("当前不在添加模式")
                 return
+
             if session.get("failed"):
                 yield event.plain_result("保存失败或已超限，添加已取消")
             elif not session["contents"]:
@@ -346,8 +365,8 @@ class KeywordPlugin(Star):
 
             # 统一清理 session 及附属任务
             timeout_task = session.get("timeout_task")
-            if timeout_task and not timeout_task.done(): timeout_task.cancel()
-
+            if timeout_task and not timeout_task.done():
+                timeout_task.cancel()
             if not self.multi_user_adding:
                 self.adding_lock_user = None
             self.sessions.pop(uid, None)
@@ -360,10 +379,9 @@ class KeywordPlugin(Star):
         async with self._session_lock:
             if uid in self.sessions:
                 kw = self.sessions[uid]["kw"]
-
                 timeout_task = self.sessions[uid].get("timeout_task")
-                if timeout_task and not timeout_task.done(): timeout_task.cancel()
-
+                if timeout_task and not timeout_task.done():
+                    timeout_task.cancel()
                 if not self.multi_user_adding:
                     self.adding_lock_user = None
                 self.sessions.pop(uid, None)
@@ -380,7 +398,6 @@ class KeywordPlugin(Star):
         if gid and str(gid) not in [str(i) for i in self.config.get("whitelist_groups", [])]:
             yield event.plain_result("本群未开启关键字功能")
             return
-
         uid = str(event.message_obj.sender.user_id)
         is_group = bool(gid and str(gid).strip())
         scope = "group" if is_group else "private"
@@ -402,7 +419,6 @@ class KeywordPlugin(Star):
         if gid and str(gid) not in [str(i) for i in self.config.get("whitelist_groups", [])]:
             yield event.plain_result("本群未开启关键字功能")
             return
-
         kw = keyword.strip().lower()
         try:
             ok = await asyncio.get_running_loop().run_in_executor(None, self.db_h.delete_keyword, kw, "global", "ALL")
@@ -419,7 +435,6 @@ class KeywordPlugin(Star):
         if gid and str(gid) not in [str(i) for i in self.config.get("whitelist_groups", [])]:
             yield event.plain_result("本群未开启关键字功能")
             return
-
         is_group = bool(gid and str(gid).strip())
         if is_group:
             scope, target, label = "group", str(gid), f"群 {gid}"
@@ -446,7 +461,6 @@ class KeywordPlugin(Star):
         if gid and str(gid) not in [str(i) for i in self.config.get("whitelist_groups", [])]:
             yield event.plain_result("本群未开启关键字功能")
             return
-
         loop = asyncio.get_running_loop()
         total = await loop.run_in_executor(None, self.db_h.get_global_total_count)
         if total == 0:
@@ -467,16 +481,14 @@ class KeywordPlugin(Star):
     async def handle_everything(self, event: AstrMessageEvent):
         self._ensure_maintenance()
 
-        # [修复] 删除原有的被动超时检查代码块，已被主动定时器取代
-
         if event.get_platform_name() != "aiocqhttp":
             return
 
         uid = str(event.message_obj.sender.user_id)
         gid_raw = event.message_obj.group_id
         gid = str(gid_raw) if (gid_raw and str(gid_raw).strip()) else None
-        msg_raw = event.message_str.strip()
 
+        msg_raw = event.message_str.strip()
         if msg_raw.startswith("/"):
             parts = msg_raw.split()
             first_word = parts[0].lower() if parts else ""
@@ -492,17 +504,23 @@ class KeywordPlugin(Star):
             if is_adding and session_snapshot:
                 if session_snapshot.get("failed"):
                     timeout_task = session_snapshot.get("timeout_task")
-                    if timeout_task and not timeout_task.done(): timeout_task.cancel()
+                    if timeout_task and not timeout_task.done():
+                        timeout_task.cancel()
                     if not self.multi_user_adding:
                         self.adding_lock_user = None
                     self.sessions.pop(uid, None)
                     self.user_task_locks.pop(uid, None)
                     return
+
                 if clean_text in ("结束添加", "取消添加"):
                     return
 
                 snapshot, forward_id = self._parse_incoming_message(event)
                 if snapshot or forward_id:
+                    # [修复] 上下文强绑定：严格限定只能在触发添加的那个群/私聊里收集媒体
+                    if event.unified_msg_origin != session_snapshot.get("umo"):
+                        return
+
                     task = asyncio.create_task(
                         self._collect_task(event.bot, uid, gid, snapshot, forward_id))
                     # [修复] 消除嵌套锁，直接在当前锁作用域内赋值
@@ -558,12 +576,15 @@ class KeywordPlugin(Star):
         return None
 
     def _get_local_media_info(self, m_type, raw_elements):
-        if not raw_elements: return "", ""
+        if not raw_elements:
+            return "", ""
         et_map = {"image": 2, "file": 3, "record": 4, "video": 5}
         target_et = et_map.get(m_type)
-        if not target_et: return "", ""
+        if not target_et:
+            return "", ""
         for elem in raw_elements:
-            if not isinstance(elem, dict) or elem.get("elementType") != target_et: continue
+            if not isinstance(elem, dict) or elem.get("elementType") != target_et:
+                continue
             if m_type == "image":
                 pic = elem.get("picElement") or {}
                 return pic.get("sourcePath", ""), pic.get("md5HexStr", "")
@@ -582,25 +603,34 @@ class KeywordPlugin(Star):
         raw_msg = getattr(event.message_obj, "raw_message", None)
         if isinstance(raw_msg, dict):
             msg = raw_msg.get("message")
-            if isinstance(msg, list) and msg and isinstance(msg[0], dict): return msg
+            if isinstance(msg, list) and msg and isinstance(msg[0], dict):
+                return msg
+
         for attr in ("_raw_ob11", "_ob11_segments", "_raw_segments", "_raw_message_list", "segments"):
             val = getattr(event.message_obj, attr, None)
-            if isinstance(val, list) and val and isinstance(val[0], dict): return val
+            if isinstance(val, list) and val and isinstance(val[0], dict):
+                return val
+
         for attr in ("_event", "_raw_event", "_raw"):
             val = (getattr(event, attr, None) or getattr(event.message_obj, attr, None))
             if isinstance(val, dict):
                 msg = val.get("message")
-                if isinstance(msg, list) and msg and isinstance(msg[0], dict): return msg
+                if isinstance(msg, list) and msg and isinstance(msg[0], dict):
+                    return msg
+
         if isinstance(raw_msg, str) and raw_msg.strip():
             parsed = MediaService._parse_cq_code(raw_msg)
-            if parsed: return parsed
+            if parsed:
+                return parsed
+
         for attr in ("_event", "_raw_event", "_raw"):
             val = (getattr(event, attr, None) or getattr(event.message_obj, attr, None))
             if isinstance(val, dict):
                 raw_str = val.get("raw_message")
                 if isinstance(raw_str, str) and raw_str.strip():
                     parsed = MediaService._parse_cq_code(raw_str)
-                    if parsed: return parsed
+                    if parsed:
+                        return parsed
         return None
 
     def _parse_incoming_message(self, event: AstrMessageEvent):
@@ -611,19 +641,24 @@ class KeywordPlugin(Star):
 
         if raw_segs:
             for seg in raw_segs:
-                if not isinstance(seg, dict): continue
+                if not isinstance(seg, dict):
+                    continue
                 stype = seg.get("type", "")
                 sdata = seg.get("data")
-                if not isinstance(sdata, dict): sdata = {}
+                if not isinstance(sdata, dict):
+                    sdata = {}
                 if stype == "forward":
                     forward_id = sdata.get("id")
                 elif stype == "text":
                     val = sdata.get("text", "")
-                    if val and val.strip(): snapshot.append({"type": "text", "val": val})
+                    if val and val.strip():
+                        snapshot.append({"type": "text", "val": val})
                 elif stype == "image" and sdata.get("emoji_id") and sdata.get("key"):
                     snapshot.append({
-                        "type": "mface", "emoji_package_id": int(sdata.get("emoji_package_id", 0) or 0),
-                        "emoji_id": str(sdata.get("emoji_id", "")), "key": str(sdata.get("key", "")),
+                        "type": "mface",
+                        "emoji_package_id": int(sdata.get("emoji_package_id", 0) or 0),
+                        "emoji_id": str(sdata.get("emoji_id", "")),
+                        "key": str(sdata.get("key", "")),
                         "summary": str(sdata.get("summary", "")),
                     })
                 elif stype in MEDIA_DOWNLOAD_TYPES:
@@ -642,24 +677,29 @@ class KeywordPlugin(Star):
                         })
                 elif stype == "face":
                     face_id = sdata.get("id")
-                    if face_id is not None: snapshot.append({"type": "face", "id": str(face_id)})
+                    if face_id is not None:
+                        snapshot.append({"type": "face", "id": str(face_id)})
                 elif stype == "at":
                     qq = sdata.get("qq", "")
-                    if qq: snapshot.append({"type": "text", "val": f"@{qq} "})
+                    if qq:
+                        snapshot.append({"type": "text", "val": f"@{qq} "})
         else:
             message_list = getattr(event.message_obj, "message", None) or []
             for comp in message_list:
                 if isinstance(comp, Plain):
                     val = comp.text.strip()
-                    if val: snapshot.append({"type": "text", "val": val})
+                    if val:
+                        snapshot.append({"type": "text", "val": val})
                 elif isinstance(comp, Image) and comp.file:
                     extra = getattr(comp, 'extra', None) or {}
                     eid = extra.get("emoji_id")
                     ekey = extra.get("key")
                     if eid and ekey:
                         snapshot.append({
-                            "type": "mface", "emoji_package_id": int(extra.get("emoji_package_id", 0) or 0),
-                            "emoji_id": str(eid), "key": str(ekey), "summary": str(extra.get("summary", "")),
+                            "type": "mface",
+                            "emoji_package_id": int(extra.get("emoji_package_id", 0) or 0),
+                            "emoji_id": str(eid), "key": str(ekey),
+                            "summary": str(extra.get("summary", "")),
                         })
                     else:
                         lp, lm = self._get_local_media_info("image", raw_elements)
@@ -685,66 +725,87 @@ class KeywordPlugin(Star):
                     snapshot.append({"type": "face", "id": str(comp.id)})
                 elif isinstance(comp, At):
                     qq = getattr(comp, "qq", None) or getattr(comp, "target", None)
-                    if qq: snapshot.append({"type": "text", "val": f"@{qq} "})
+                    if qq:
+                        snapshot.append({"type": "text", "val": f"@{qq} "})
+
         return snapshot, forward_id
 
     # ==================================================================
     # 四、合并转发提取（递归）
     # ==================================================================
     async def _extract_forward_nodes(self, bot, forward_id, session_hashes, depth=1):
-        if depth > self.max_nested_depth: return "depth_exceeded"
+        if depth > self.max_nested_depth:
+            return "depth_exceeded"
         try:
             res = await bot.api.call_action("get_forward_msg", message_id=str(forward_id))
             if isinstance(res, dict) and isinstance(res.get("data"), dict):
                 messages = res["data"].get("messages")
             else:
                 messages = res.get("messages") if isinstance(res, dict) else None
-            if not isinstance(messages, list): return "api_error"
-            if len(messages) > self.max_forward_count: return "count_exceeded"
+            if not isinstance(messages, list):
+                return "api_error"
+            if len(messages) > self.max_forward_count:
+                return "count_exceeded"
             nodes = await self._process_forward_messages(bot, messages, session_hashes, depth)
-            if nodes is None: return "unsupported_type"
+            if nodes is None:
+                return "unsupported_type"
             return nodes if nodes else "empty"
         except Exception as e:
             logger.error(f"获取合并转发异常: {e}")
             return "api_error"
 
     async def _process_forward_messages(self, bot, messages, session_hashes, depth):
-        if depth > self.max_nested_depth: return None
-        if not isinstance(messages, list) or len(messages) > self.max_forward_count: return None
+        if depth > self.max_nested_depth:
+            return None
+        if not isinstance(messages, list) or len(messages) > self.max_forward_count:
+            return None
         await self._ensure_bot_info(bot)
         nodes = []
         for msg in messages:
-            if not isinstance(msg, dict): continue
+            if not isinstance(msg, dict):
+                continue
             content = msg.get("content") or msg.get("message") or []
-            if isinstance(content, str): content = MediaService._parse_cq_code(content)
-            if not isinstance(content, list): content = []
+            if isinstance(content, str):
+                content = MediaService._parse_cq_code(content)
+            if not isinstance(content, list):
+                content = []
             processed = await self._process_forward_segments(bot, content, session_hashes, depth)
-            if processed is None: return None
+            if processed is None:
+                return None
             if processed:
                 nodes.append({
-                    "uin": self._bot_uid or "0", "name": self._bot_name or "Bot", "content": processed
+                    "uin": self._bot_uid or "0",
+                    "name": self._bot_name or "Bot",
+                    "content": processed
                 })
         return nodes if nodes else None
 
     async def _process_forward_segments(self, bot, segments, session_hashes, depth):
         result = []
         for seg in segments:
-            if not isinstance(seg, dict): continue
+            if not isinstance(seg, dict):
+                continue
             st = seg.get("type")
             sd = seg.get("data") or {}
-            if not isinstance(sd, dict): sd = {}
+            if not isinstance(sd, dict):
+                sd = {}
+
             if st == "text":
                 text = sd.get("text", "").replace("\u200b", "")
-                if text.strip(): result.append({"type": "text", "data": text})
+                if text.strip():
+                    result.append({"type": "text", "data": text})
             elif st == "at":
                 qq = sd.get("qq", "")
-                if qq: result.append({"type": "text", "data": f"@{qq} "})
+                if qq:
+                    result.append({"type": "text", "data": f"@{qq} "})
             elif st == "face":
                 fid = sd.get("id")
-                if fid is not None: result.append({"type": "face", "id": str(fid)})
+                if fid is not None:
+                    result.append({"type": "face", "id": str(fid)})
             elif st == "mface":
                 result.append({
-                    "type": "mface", "emoji_id": sd.get("emoji_id", ""), "key": sd.get("key", ""),
+                    "type": "mface",
+                    "emoji_id": sd.get("emoji_id", ""), "key": sd.get("key", ""),
                     "summary": sd.get("summary", ""), "emoji_package_id": sd.get("emoji_package_id", 0),
                 })
             elif st in ("image", "record", "video", "file"):
@@ -755,7 +816,8 @@ class KeywordPlugin(Star):
                     url_md5 = None
                     base_name = os.path.basename(url_val)
                     name_part, _ = os.path.splitext(base_name)
-                    if len(name_part) == 32: url_md5 = name_part
+                    if len(name_part) == 32:
+                        url_md5 = name_part
                     if url_md5:
                         try:
                             loop = asyncio.get_running_loop()
@@ -768,11 +830,14 @@ class KeywordPlugin(Star):
                                     need_download = False
                         except Exception as e:
                             logger.error(f"本地缓存查库异常: {e}")
+
                 if need_download and fn:
                     r = await self.media_s.save_forwarded_media(bot, st, raw_data=sd, max_size=self.max_file_size,
                                                                 bot_uid=self._bot_uid)
-                    if isinstance(r, dict) and r.get("error"): return None
-                    if not r: return None
+                    if isinstance(r, dict) and r.get("error"):
+                        return None
+                    if not r:
+                        return None
                     session_hashes.append(r["hash"])
                     result.append({"type": st, "file": r["path"]})
             elif st == "forward":
@@ -783,8 +848,10 @@ class KeywordPlugin(Star):
                     nested_nodes = await self._process_forward_messages(bot, nested_content, session_hashes, depth + 1)
                 elif nested_id:
                     nested_nodes = await self._extract_forward_nodes(bot, nested_id, session_hashes, depth + 1)
-                if isinstance(nested_nodes, str): return None
-                if nested_nodes is None: return None
+                if isinstance(nested_nodes, str):
+                    return None
+                if nested_nodes is None:
+                    return None
                 result.append({"type": "forward_node", "id": nested_id, "nodes": nested_nodes})
         return result
 
@@ -792,9 +859,12 @@ class KeywordPlugin(Star):
     # 五、发送实现
     # ==================================================================
     async def _do_send(self, event: AstrMessageEvent, match_data: list):
-        if not match_data: return
-        if not self._bot_name: await self._ensure_bot_info(event.bot)
+        if not match_data:
+            return
+        if not self._bot_name:
+            await self._ensure_bot_info(event.bot)
         bot_id, bot_name = self._bot_uid or "0", self._bot_name or "Bot"
+
         async with self._global_send_lock:
             await asyncio.sleep(random.uniform(0.5, 1.5))
             must_forward = []
@@ -808,21 +878,26 @@ class KeywordPlugin(Star):
                     unsafe.append(block)
                 else:
                     safe.append(block)
+
             forward_blocks = list(must_forward)
             threshold = self.forward_threshold
             need_safe_forward = (threshold == 0 or len(safe) > threshold)
-            if need_safe_forward: forward_blocks.extend(safe)
+            if need_safe_forward:
+                forward_blocks.extend(safe)
+
             first_sent = False
             if forward_blocks:
                 await self._send_via_forward(event, forward_blocks)
                 first_sent = True
             if not need_safe_forward:
                 for block in safe:
-                    if first_sent: await asyncio.sleep(random.uniform(1.0, 2.0))
+                    if first_sent:
+                        await asyncio.sleep(random.uniform(1.0, 2.0))
                     await self._send_via_normal(event, block)
                     first_sent = True
             for block in unsafe:
-                if first_sent: await asyncio.sleep(random.uniform(1.0, 2.0))
+                if first_sent:
+                    await asyncio.sleep(random.uniform(1.0, 2.0))
                 await self._send_via_normal(event, block)
                 first_sent = True
 
@@ -832,7 +907,8 @@ class KeywordPlugin(Star):
         bot_id, bot_name = self._bot_uid or "0", self._bot_name or "Bot"
         ob11_nodes = []
         for block in blocks:
-            if not isinstance(block, list) or not block: continue
+            if not isinstance(block, list) or not block:
+                continue
             is_forward = any(isinstance(s, dict) and s.get("type") == "forward_node" for s in block)
             if is_forward:
                 inner_ob11_nodes = []
@@ -843,7 +919,8 @@ class KeywordPlugin(Star):
                                 inner_content = self._segments_to_ob11(inner_node.get("content") or [])
                                 if inner_content:
                                     inner_ob11_nodes.append({
-                                        "type": "node", "data": {
+                                        "type": "node",
+                                        "data": {
                                             "uin": str(inner_node.get("uin") or bot_id),
                                             "name": str(inner_node.get("name") or bot_name),
                                             "content": inner_content,
@@ -851,23 +928,28 @@ class KeywordPlugin(Star):
                                     })
                 if inner_ob11_nodes:
                     ob11_nodes.append({
-                        "type": "node", "data": {"uin": bot_id, "name": bot_name, "content": inner_ob11_nodes},
+                        "type": "node",
+                        "data": {"uin": bot_id, "name": bot_name, "content": inner_ob11_nodes},
                     })
             else:
                 content = self._segments_to_ob11(block)
                 if content:
                     ob11_nodes.append({
-                        "type": "node", "data": {"uin": bot_id, "name": bot_name, "content": content},
+                        "type": "node",
+                        "data": {"uin": bot_id, "name": bot_name, "content": content},
                     })
-        if not ob11_nodes: return
+        if not ob11_nodes:
+            return
         gid = event.get_group_id()
         uid = event.get_sender_id()
         safe_gid = self._safe_int(gid)
         safe_uid = self._safe_int(uid)
         try:
             await api.call_action(
-                "send_forward_msg", message_type="group" if gid else "private",
-                group_id=safe_gid, user_id=safe_uid, messages=ob11_nodes, prompt=bot_name,
+                "send_forward_msg",
+                message_type="group" if gid else "private",
+                group_id=safe_gid, user_id=safe_uid,
+                messages=ob11_nodes, prompt=bot_name,
             )
         except Exception as e:
             logger.warning(f"send_forward_msg 失败，尝试回退旧接口: {e}")
@@ -891,14 +973,17 @@ class KeywordPlugin(Star):
                     safe_uid = self._safe_int(uid)
                     params = {"message": ob11_msg}
                     if safe_gid:
-                        params["group_id"] = safe_gid; params["message_type"] = "group"
+                        params["group_id"] = safe_gid;
+                        params["message_type"] = "group"
                     elif safe_uid:
-                        params["user_id"] = safe_uid; params["message_type"] = "private"
+                        params["user_id"] = safe_uid;
+                        params["message_type"] = "private"
                     await event.bot.api.call_action("send_msg", **params)
                 return
             except Exception as e:
                 logger.error(f"商城表情已过期或下架: {e}")
                 return
+
         comps = self._to_comps(block)
         if comps:
             try:
@@ -909,17 +994,21 @@ class KeywordPlugin(Star):
     def _segments_to_ob11(self, segments):
         result = []
         for seg in segments:
-            if not isinstance(seg, dict): continue
+            if not isinstance(seg, dict):
+                continue
             t = seg.get("type")
             if t == "forward_node":
                 inner_nodes = seg.get("nodes") or []
                 for inner in inner_nodes:
-                    if not isinstance(inner, dict): continue
+                    if not isinstance(inner, dict):
+                        continue
                     inner_content = self._segments_to_ob11(inner.get("content") or [])
                     if inner_content:
                         result.append({
-                            "type": "node", "data": {
-                                "uin": str(inner.get("uin") or ""), "name": str(inner.get("name") or ""),
+                            "type": "node",
+                            "data": {
+                                "uin": str(inner.get("uin") or ""),
+                                "name": str(inner.get("name") or ""),
                                 "content": inner_content,
                             },
                         })
@@ -934,12 +1023,15 @@ class KeywordPlugin(Star):
             elif t == "file":
                 f_path = seg.get("file", "").replace("\\", "/")
                 d = {"type": "file", "data": {"file": f_path}}
-                if seg.get("name"): d["data"]["name"] = seg["name"]
+                if seg.get("name"):
+                    d["data"]["name"] = seg["name"]
                 result.append(d)
             elif t == "mface":
                 result.append({
-                    "type": "mface", "data": {
-                        "emoji_id": seg.get("emoji_id", ""), "summary": seg.get("summary", ""),
+                    "type": "mface",
+                    "data": {
+                        "emoji_id": seg.get("emoji_id", ""),
+                        "summary": seg.get("summary", ""),
                         "emoji_package_id": str(seg.get("emoji_package_id", "")),
                     },
                 })
@@ -950,7 +1042,8 @@ class KeywordPlugin(Star):
     def _to_comps(self, block: list) -> list:
         res: list = []
         for i in block:
-            if not isinstance(i, dict): continue
+            if not isinstance(i, dict):
+                continue
             t = i.get("type")
             f = (i.get("file") or "").replace("\\", "/")
             if t == "text":
@@ -974,137 +1067,169 @@ class KeywordPlugin(Star):
             safe_uid = self._safe_int(uid)
             params = {"message": [{"type": "text", "data": {"text": text}}]}
             if safe_gid:
-                params["group_id"] = safe_gid; params["message_type"] = "group"
+                params["group_id"] = safe_gid;
+                params["message_type"] = "group"
             elif safe_uid:
-                params["user_id"] = safe_uid; params["message_type"] = "private"
+                params["user_id"] = safe_uid;
+                params["message_type"] = "private"
             await bot.api.call_action("send_msg", **params)
         except Exception as e:
             logger.error(f"发送收集提示失败: {e}")
 
     # ==================================================================
-    # 六、内容收集
+    # 六、内容收集（已重构超时机制）
     # ==================================================================
     async def _collect_task(self, bot, uid, gid, snapshot, forward_id):
         async with self._session_lock:
             session = self.sessions.get(uid)
-            if not session: return
+            if not session:
+                return
             if uid not in self.user_task_locks:
                 self.user_task_locks[uid] = asyncio.Lock()
 
-            # [修复] 取消旧的超时定时器，并启动新的定时器，实现“每次交互重置倒计时”
+            # [终极修复] 暂停超时：在处理繁重任务期间取消超时计时器，防止大文件下载时被误杀
             old_timeout_task = session.get("timeout_task")
-            if old_timeout_task and not old_timeout_task.done(): old_timeout_task.cancel()
-            new_timeout_task = asyncio.create_task(self._start_session_timeout(uid))
-            session["timeout_task"] = new_timeout_task
+            if old_timeout_task and not old_timeout_task.done():
+                old_timeout_task.cancel()
+            session["timeout_task"] = None
 
-            session["last_time"] = time.time()
             session_hashes = session["hashes"]
 
-        async with self.user_task_locks[uid]:
+        failed = False
+        try:
+            async with self.user_task_locks[uid]:
+                async with self._session_lock:
+                    session = self.sessions.get(uid)
+                    if not session:
+                        return
+
+                block: list[dict] = []
+                m_type = "unknown"
+
+                if forward_id:
+                    await self._ensure_bot_info(bot)
+                    if not self._bot_uid:
+                        await self._send_collect_notice(bot, gid, uid, "获取Bot信息失败，添加已取消")
+                        failed = True
+                        return
+
+                    result = await self._extract_forward_nodes(bot, forward_id, session_hashes)
+                    error_msgs = {
+                        "depth_exceeded": "超出嵌套深度限制",
+                        "count_exceeded": "超出消息数量限制",
+                        "unsupported_type": "包含不支持的内容类型（如文件）或媒体大小超限",
+                        "api_error": "获取合并转发消息失败",
+                        "empty": "合并转发内容为空",
+                    }
+                    if isinstance(result, str):
+                        msg = error_msgs.get(result, "获取合并转发消息失败")
+                        await self._send_collect_notice(bot, gid, uid, f"{msg}，添加已取消")
+                        failed = True
+                        return
+
+                    block.append({"type": "forward_node", "id": str(forward_id), "nodes": result})
+                    await self._send_collect_notice(bot, gid, uid, "已记录合并转发内容")
+                    async with self._session_lock:
+                        if uid in self.sessions:
+                            self.sessions[uid]["contents"].append(block)
+                    return
+
+                for item in snapshot:
+                    try:
+                        if item["type"] == "text":
+                            block.append({"type": "text", "data": item["val"]})
+                        elif item["type"] == "face":
+                            block.append({"type": "face", "id": item["id"]})
+                        elif item["type"] == "mface":
+                            block.append({
+                                "type": "mface", "emoji_id": item.get("emoji_id", ""),
+                                "key": item.get("key", ""), "summary": item.get("summary", ""),
+                                "emoji_package_id": item.get("emoji_package_id", 0),
+                            })
+                        elif item["type"] == "media":
+                            m_type = item["m_type"]
+                            ob11_size = item.get("file_size")
+                            expected_size = 0
+                            if ob11_size:
+                                try:
+                                    expected_size = int(ob11_size)
+                                    if expected_size > self.max_file_size:
+                                        await self._send_collect_notice(bot, gid, uid,
+                                                                        f"{m_type} 文件大小超过限制，添加已取消")
+                                        failed = True
+                                        return
+                                except (ValueError, TypeError):
+                                    pass
+
+                            lp = item.get("local_path", "")
+                            if lp and expected_size == 0:
+                                try:
+                                    loop = asyncio.get_running_loop()
+                                    expected_size = await loop.run_in_executor(None, os.path.getsize, lp)
+                                    if expected_size > self.max_file_size:
+                                        await self._send_collect_notice(bot, gid, uid,
+                                                                        f"{m_type} 文件大小({expected_size}字节)超过限制，添加已取消")
+                                        failed = True
+                                        return
+                                except OSError:
+                                    pass
+
+                            orig_name = None
+                            if m_type == "file":
+                                orig_name = item.get("id") or None
+
+                            r = await self.media_s.save_media(
+                                bot, m_type, file_name=item.get("id"), file_id=item.get("file_id"),
+                                local_path=item.get("local_path"), md5=item.get("md5") or item.get("local_md5"),
+                                original_name=orig_name, max_size=self.max_file_size, expected_size=expected_size)
+
+                            if isinstance(r, dict) and r.get("error") == "too_large":
+                                fsize = r.get("size", 0)
+                                await self._send_collect_notice(bot, gid, uid,
+                                                                f"{m_type} 文件大小({fsize}字节)超过限制，添加已取消")
+                                failed = True
+                                return
+                            elif isinstance(r, dict) and r.get("error") == "download_timeout":
+                                await self._send_collect_notice(bot, gid, uid, f"{m_type} 文件下载超时，添加已取消")
+                                failed = True
+                                return
+                            elif r and "error" not in r:
+                                saved = {"type": m_type, "file": r["path"]}
+                                if m_type == "file" and r.get("name"):
+                                    saved["name"] = r["name"]
+                                block.append(saved)
+                                session_hashes.append(r["hash"])
+                                await self._send_collect_notice(bot, gid, uid, f"已存入 {m_type}")
+                            else:
+                                await self._send_collect_notice(bot, gid, uid, f"{m_type} 保存失败，已跳过")
+                    except Exception as e:
+                        item_type = item.get('type', 'unknown')
+                        logger.error(f"{item_type} 保存异常: {traceback.format_exc()}")
+                        await self._send_collect_notice(bot, gid, uid,
+                                                        f"{item_type} 保存异常({type(e).__name__}: {e})，已跳过")
+
+                if block:
+                    async with self._session_lock:
+                        if uid in self.sessions:
+                            self.sessions[uid]["contents"].append(block)
+        except Exception as e:
+            logger.error(f"_collect_task 处理未捕获异常: {traceback.format_exc()}")
+            failed = True
+        finally:
+            # [终极修复] 恢复超时与清理僵尸：无论成功失败，必须在此处决定 session 的命运
             async with self._session_lock:
                 session = self.sessions.get(uid)
-                if not session: return
-
-            block: list[dict] = []
-            m_type = "unknown"
-            if forward_id:
-                await self._ensure_bot_info(bot)
-                if not self._bot_uid:
-                    await self._send_collect_notice(bot, gid, uid, "获取Bot信息失败，添加已取消")
-                    async with self._session_lock:
-                        if uid in self.sessions: self.sessions[uid]["failed"] = True
-                    return
-                result = await self._extract_forward_nodes(bot, forward_id, session_hashes)
-                error_msgs = {
-                    "depth_exceeded": "超出嵌套深度限制", "count_exceeded": "超出消息数量限制",
-                    "unsupported_type": "包含不支持的内容类型（如文件）或媒体大小超限",
-                    "api_error": "获取合并转发消息失败", "empty": "合并转发内容为空",
-                }
-                if isinstance(result, str):
-                    msg = error_msgs.get(result, "获取合并转发消息失败")
-                    await self._send_collect_notice(bot, gid, uid, f"{msg}，添加已取消")
-                    async with self._session_lock:
-                        if uid in self.sessions: self.sessions[uid]["failed"] = True
-                    return
-                block.append({"type": "forward_node", "id": str(forward_id), "nodes": result})
-                await self._send_collect_notice(bot, gid, uid, "已记录合并转发内容")
-                async with self._session_lock:
-                    if uid in self.sessions: self.sessions[uid]["contents"].append(block)
-                return
-
-            for item in snapshot:
-                try:
-                    if item["type"] == "text":
-                        block.append({"type": "text", "data": item["val"]})
-                    elif item["type"] == "face":
-                        block.append({"type": "face", "id": item["id"]})
-                    elif item["type"] == "mface":
-                        block.append({
-                            "type": "mface", "emoji_id": item.get("emoji_id", ""), "key": item.get("key", ""),
-                            "summary": item.get("summary", ""), "emoji_package_id": item.get("emoji_package_id", 0),
-                        })
-                    elif item["type"] == "media":
-                        m_type = item["m_type"]
-                        ob11_size = item.get("file_size")
-                        expected_size = 0
-                        if ob11_size:
-                            try:
-                                expected_size = int(ob11_size)
-                                if expected_size > self.max_file_size:
-                                    await self._send_collect_notice(bot, gid, uid,
-                                                                    f"{m_type} 文件大小超过限制，添加已取消")
-                                    async with self._session_lock:
-                                        if uid in self.sessions: self.sessions[uid]["failed"] = True
-                                    return
-                            except (ValueError, TypeError):
-                                pass
-                        lp = item.get("local_path", "")
-                        if lp and expected_size == 0:
-                            try:
-                                loop = asyncio.get_running_loop()
-                                expected_size = await loop.run_in_executor(None, os.path.getsize, lp)
-                                if expected_size > self.max_file_size:
-                                    await self._send_collect_notice(bot, gid, uid,
-                                                                    f"{m_type} 文件大小({expected_size}字节)超过限制，添加已取消")
-                                    async with self._session_lock:
-                                        if uid in self.sessions: self.sessions[uid]["failed"] = True
-                                    return
-                            except OSError:
-                                pass
-                        orig_name = None
-                        if m_type == "file": orig_name = item.get("id") or None
-                        r = await self.media_s.save_media(
-                            bot, m_type, file_name=item.get("id"), file_id=item.get("file_id"),
-                            local_path=item.get("local_path"), md5=item.get("md5") or item.get("local_md5"),
-                            original_name=orig_name, max_size=self.max_file_size, expected_size=expected_size)
-                        if isinstance(r, dict) and r.get("error") == "too_large":
-                            fsize = r.get("size", 0)
-                            await self._send_collect_notice(bot, gid, uid,
-                                                            f"{m_type} 文件大小({fsize}字节)超过限制，添加已取消")
-                            async with self._session_lock:
-                                if uid in self.sessions: self.sessions[uid]["failed"] = True
-                            return
-                        elif isinstance(r, dict) and r.get("error") == "download_timeout":
-                            await self._send_collect_notice(bot, gid, uid, f"{m_type} 文件下载超时，添加已取消")
-                            async with self._session_lock:
-                                if uid in self.sessions: self.sessions[uid]["failed"] = True
-                            return
-                        elif r and "error" not in r:
-                            saved = {"type": m_type, "file": r["path"]}
-                            if m_type == "file" and r.get("name"): saved["name"] = r["name"]
-                            block.append(saved)
-                            session_hashes.append(r["hash"])
-                            await self._send_collect_notice(bot, gid, uid, f"已存入 {m_type}")
-                        else:
-                            await self._send_collect_notice(bot, gid, uid, f"{m_type} 保存失败，已跳过")
-                except Exception as e:
-                    item_type = item.get('type', 'unknown')
-                    logger.error(f"{item_type} 保存异常: {traceback.format_exc()}")
-                    await self._send_collect_notice(bot, gid, uid,
-                                                    f"{item_type} 保存异常({type(e).__name__}: {e})，已跳过")
-            if block:
-                async with self._session_lock:
-                    if uid in self.sessions: self.sessions[uid]["contents"].append(block)
+                if session:
+                    if session.get("failed") or failed:
+                        # 如果中途失败了，直接清理 session，不留僵尸等待用户下次发消息触发
+                        if not self.multi_user_adding:
+                            self.adding_lock_user = None
+                        self.sessions.pop(uid, None)
+                        self.user_task_locks.pop(uid, None)
+                    else:
+                        # 处理成功完成，重新启动超时倒计时
+                        new_timeout_task = asyncio.create_task(self._start_session_timeout(uid))
+                        session["timeout_task"] = new_timeout_task
 
     # ==================================================================
     # 七、后台维护
