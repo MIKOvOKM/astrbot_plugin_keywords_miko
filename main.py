@@ -71,7 +71,16 @@ class KeywordPlugin(Star):
         self._last_trigger_time: dict[str, float] = {}
 
         # [新增] 自动撤回
-        self.auto_delete_groups: dict[str, int] = self.config.get("auto_delete_groups", {})
+        raw_del = self.config.get("auto_delete_groups", {})
+        self.auto_delete_groups: dict[str, int] = {}
+        if isinstance(raw_del, dict):
+            for k, v in raw_del.items():
+                try:
+                    delay = int(v)
+                    if 10 <= delay <= 90:
+                        self.auto_delete_groups[str(k)] = delay
+                except (ValueError, TypeError):
+                    pass
 
         self.user_task_locks: dict[str, asyncio.Lock] = {}
         self._session_lock = asyncio.Lock()
