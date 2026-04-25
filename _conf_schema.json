@@ -9,33 +9,27 @@
     "type": "list",
     "description": "管理员ID列表",
     "hint": "重要配置，未配置时无法管理插件的增删和权限管理。多个QQ号用逗号分隔。",
-    "items": {
-      "type": "int"
-    },
+    "items": { "type": "int" },
     "default": []
   },
   "whitelist_groups": {
     "type": "list",
     "description": "群组白名单（初始值）",
     "hint": "在此列表中的群组启用关键字回复功能，后续可通过命令动态添加/移除。多个群号用逗号分隔。",
-    "items": {
-      "type": "int"
-    },
+    "items": { "type": "int" },
     "default": []
   },
   "global_whitelist_groups": {
     "type": "list",
     "description": "全局关键字白名单群组（初始值）",
     "hint": "在此列表中的群组可触发全局关键字，后续可通过命令动态添加/移除。多个群号用逗号分隔。",
-    "items": {
-      "type": "int"
-    },
+    "items": { "type": "int" },
     "default": []
   },
   "session_timeout_seconds": {
     "type": "int",
     "description": "添加关键字会话的超时时间（秒）",
-    "hint": "如果管理员在添加模式下超过此时间未发送任何有效内容，系统将自动取消本次添加，防止占用资源。默认为300秒（5分钟）。修改请填写具体秒数。",
+    "hint": "如果在处理文件(如下载视频)期间，倒计时会自动暂停；处理完成后重新开始倒计时。如果一直不发送新内容，超过此时间将自动取消本次添加。默认为300秒（5分钟）。修改请填写具体秒数。",
     "default": 300,
     "min": 60,
     "max": 86400

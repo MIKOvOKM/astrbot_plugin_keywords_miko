@@ -101,7 +101,8 @@ class KeywordPlugin(Star):
                 self._bot_uid = str(res.get("user_id", "0"))
                 self._bot_name = res.get("nickname", "Bot")
             except Exception as e:
-                logger.error(f"获取Bot信息失败: {e}")
+                # [修复 3] 日志降噪：网络波动不应产生 error 级别告警
+                logger.warning(f"获取Bot信息失败: {e}")
 
     @staticmethod
     def _safe_int(val) -> int | None:
@@ -220,7 +221,6 @@ class KeywordPlugin(Star):
         scope = "group" if is_group else "private"
         target = str(gid) if is_group else uid
 
-        # [修复] 增加白名单前置校验，防止越权添加产生死数据和存储泄漏
         if is_group and str(gid) not in [str(i) for i in self.config.get("whitelist_groups", [])]:
             yield event.plain_result("本群未开启关键字功能，请先使用 /开启群关键字")
             return
@@ -235,7 +235,6 @@ class KeywordPlugin(Star):
             yield event.plain_result(f"关键字【{kw}】已存在，请先删除后再添加")
             return
 
-        # [修复] 消除嵌套锁，合并为单次获取
         async with self._session_lock:
             if self.multi_user_adding:
                 if uid in self.sessions:
@@ -284,7 +283,6 @@ class KeywordPlugin(Star):
             yield event.plain_result(f"全局关键字【{kw}】已存在，请先删除后再添加")
             return
 
-        # [修复] 消除嵌套锁，合并为单次获取
         async with self._session_lock:
             if self.multi_user_adding:
                 if uid in self.sessions:
@@ -345,20 +343,26 @@ class KeywordPlugin(Star):
                 yield event.plain_result("未收到任何有效内容，添加已取消")
             else:
                 try:
-                    max_kw = self.config.get("max_keywords_per_scope", 50)
-                    loop = asyncio.get_running_loop()
-                    current = await loop.run_in_executor(None, self.db_h.count_scope_keywords, session["scope"],
-                                                         session["target"])
-                    if current >= max_kw:
-                        yield event.plain_result(f"该作用域关键字数量已达上限({max_kw})，无法继续添加")
+                    # [修复 1] 防幽灵关键字漏洞：入库前二次校验白名单
+                    if session["scope"] == "group" and session["target"] not in [str(i) for i in
+                                                                                 self.config.get("whitelist_groups",
+                                                                                                 [])]:
+                        yield event.plain_result("添加失败：该群已被移出白名单，添加流程已中止")
                     else:
-                        ok = await loop.run_in_executor(
-                            None, self.db_h.save_keyword, session["kw"], session["scope"], session["target"],
-                            session["contents"], uid, session["hashes"])
-                        if ok:
-                            yield event.plain_result(f'关键字【{session["kw"]}】添加成功')
+                        max_kw = self.config.get("max_keywords_per_scope", 50)
+                        loop = asyncio.get_running_loop()
+                        current = await loop.run_in_executor(None, self.db_h.count_scope_keywords, session["scope"],
+                                                             session["target"])
+                        if current >= max_kw:
+                            yield event.plain_result(f"该作用域关键字数量已达上限({max_kw})，无法继续添加")
                         else:
-                            yield event.plain_result(f'关键字【{session["kw"]}】已存在，添加失败')
+                            ok = await loop.run_in_executor(
+                                None, self.db_h.save_keyword, session["kw"], session["scope"], session["target"],
+                                session["contents"], uid, session["hashes"])
+                            if ok:
+                                yield event.plain_result(f'关键字【{session["kw"]}】添加成功')
+                            else:
+                                yield event.plain_result(f'关键字【{session["kw"]}】已存在，添加失败')
                 except Exception as e:
                     logger.error(f"保存关键字异常: {traceback.format_exc()}")
                     yield event.plain_result(f"保存失败: {str(e)}")
@@ -394,7 +398,6 @@ class KeywordPlugin(Star):
     @filter.permission_type(filter.PermissionType.ADMIN)
     async def cmd_delete(self, event: AstrMessageEvent, keyword: str):
         gid = event.message_obj.group_id
-        # [修复] 增加白名单前置校验
         if gid and str(gid) not in [str(i) for i in self.config.get("whitelist_groups", [])]:
             yield event.plain_result("本群未开启关键字功能")
             return
@@ -415,7 +418,6 @@ class KeywordPlugin(Star):
     @filter.permission_type(filter.PermissionType.ADMIN)
     async def cmd_delete_global(self, event: AstrMessageEvent, keyword: str):
         gid = event.message_obj.group_id
-        # [修复] 增加白名单前置校验
         if gid and str(gid) not in [str(i) for i in self.config.get("whitelist_groups", [])]:
             yield event.plain_result("本群未开启关键字功能")
             return
@@ -431,7 +433,6 @@ class KeywordPlugin(Star):
     @filter.command("关键字列表")
     async def cmd_list(self, event: AstrMessageEvent, page: int = 1):
         gid = event.message_obj.group_id
-        # [修复] 增加白名单前置校验
         if gid and str(gid) not in [str(i) for i in self.config.get("whitelist_groups", [])]:
             yield event.plain_result("本群未开启关键字功能")
             return
@@ -457,7 +458,6 @@ class KeywordPlugin(Star):
     @filter.command("全局关键字列表")
     async def cmd_list_global(self, event: AstrMessageEvent, page: int = 1):
         gid = event.message_obj.group_id
-        # [修复] 增加白名单前置校验
         if gid and str(gid) not in [str(i) for i in self.config.get("whitelist_groups", [])]:
             yield event.plain_result("本群未开启关键字功能")
             return
@@ -517,13 +517,11 @@ class KeywordPlugin(Star):
 
                 snapshot, forward_id = self._parse_incoming_message(event)
                 if snapshot or forward_id:
-                    # [修复] 上下文强绑定：严格限定只能在触发添加的那个群/私聊里收集媒体
                     if event.unified_msg_origin != session_snapshot.get("umo"):
                         return
 
                     task = asyncio.create_task(
                         self._collect_task(event.bot, uid, gid, snapshot, forward_id))
-                    # [修复] 消除嵌套锁，直接在当前锁作用域内赋值
                     if uid in self.sessions:
                         self.sessions[uid]["pending_task"] = task
                     event.stop_event()
@@ -536,7 +534,6 @@ class KeywordPlugin(Star):
             if uid not in self.admin_users:
                 return
 
-        # [修复] 纯媒体添加双重保险：如果处于添加模式，即使无文字也不拦截
         if not clean_text:
             is_current_adding = (uid in self.sessions) if self.multi_user_adding else (self.adding_lock_user == uid)
             if not is_current_adding:
@@ -1077,7 +1074,7 @@ class KeywordPlugin(Star):
             logger.error(f"发送收集提示失败: {e}")
 
     # ==================================================================
-    # 六、内容收集（已重构超时机制）
+    # 六、内容收集
     # ==================================================================
     async def _collect_task(self, bot, uid, gid, snapshot, forward_id):
         async with self._session_lock:
@@ -1087,7 +1084,6 @@ class KeywordPlugin(Star):
             if uid not in self.user_task_locks:
                 self.user_task_locks[uid] = asyncio.Lock()
 
-            # [终极修复] 暂停超时：在处理繁重任务期间取消超时计时器，防止大文件下载时被误杀
             old_timeout_task = session.get("timeout_task")
             if old_timeout_task and not old_timeout_task.done():
                 old_timeout_task.cancel()
@@ -1216,20 +1212,20 @@ class KeywordPlugin(Star):
             logger.error(f"_collect_task 处理未捕获异常: {traceback.format_exc()}")
             failed = True
         finally:
-            # [终极修复] 恢复超时与清理僵尸：无论成功失败，必须在此处决定 session 的命运
             async with self._session_lock:
                 session = self.sessions.get(uid)
                 if session:
                     if session.get("failed") or failed:
-                        # 如果中途失败了，直接清理 session，不留僵尸等待用户下次发消息触发
                         if not self.multi_user_adding:
                             self.adding_lock_user = None
                         self.sessions.pop(uid, None)
                         self.user_task_locks.pop(uid, None)
                     else:
-                        # 处理成功完成，重新启动超时倒计时
                         new_timeout_task = asyncio.create_task(self._start_session_timeout(uid))
                         session["timeout_task"] = new_timeout_task
+                else:
+                    # [修复 2] 防御性兜底：清理可能残留的任务锁
+                    self.user_task_locks.pop(uid, None)
 
     # ==================================================================
     # 七、后台维护
