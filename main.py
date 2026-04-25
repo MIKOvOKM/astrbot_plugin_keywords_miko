@@ -16,7 +16,7 @@ MEDIA_DOWNLOAD_TYPES = frozenset({"image", "record", "video", "file"})
     "astrbot_plugin_keywords_miko",
     "MIKOvOKM",
     "关键字回复系统",
-    "1.0.0",
+    "1.1.0",
 )
 class KeywordPlugin(Star):
     def __init__(self, context: Context, config: dict):
@@ -66,6 +66,13 @@ class KeywordPlugin(Star):
         self.multi_user_adding: bool = bool(self.config.get("multi_user_adding", False))
         self.maintenance_interval: int = self.config.get("maintenance_interval_seconds", 86400)
 
+        # [新增] 触发冷却
+        self.trigger_cooldown: int = max(0, int(self.config.get("trigger_cooldown_seconds", 5)))
+        self._last_trigger_time: dict[str, float] = {}
+
+        # [新增] 自动撤回
+        self.auto_delete_groups: dict[str, int] = self.config.get("auto_delete_groups", {})
+
         self.user_task_locks: dict[str, asyncio.Lock] = {}
         self._session_lock = asyncio.Lock()
         self._bot_uid: str | None = None
@@ -101,7 +108,7 @@ class KeywordPlugin(Star):
                 self._bot_uid = str(res.get("user_id", "0"))
                 self._bot_name = res.get("nickname", "Bot")
             except Exception as e:
-                # [修复 3] 日志降噪：网络波动不应产生 error 级别告警
+                # [修复 3] 日志降噪
                 logger.warning(f"获取Bot信息失败: {e}")
 
     @staticmethod
@@ -113,9 +120,6 @@ class KeywordPlugin(Star):
         except (ValueError, TypeError):
             return None
 
-    # ==================================================================
-    # 新增：主动超时定时器任务
-    # ==================================================================
     async def _start_session_timeout(self, uid: str):
         try:
             await asyncio.sleep(self.session_timeout)
@@ -247,23 +251,15 @@ class KeywordPlugin(Star):
 
             timeout_task = asyncio.create_task(self._start_session_timeout(uid))
             self.sessions[uid] = {
-                "kw": kw,
-                "scope": scope,
-                "target": target,
-                "contents": [],
-                "hashes": [],
-                "last_time": time.time(),
-                "umo": event.unified_msg_origin,
-                "failed": False,
-                "pending_task": None,
-                "timeout_task": timeout_task,
+                "kw": kw, "scope": scope, "target": target,
+                "contents": [], "hashes": [], "last_time": time.time(),
+                "umo": event.unified_msg_origin, "failed": False,
+                "pending_task": None, "timeout_task": timeout_task,
             }
             if not self.multi_user_adding:
                 self.adding_lock_user = uid
 
-        yield event.plain_result(
-            f'正在添加关键字【{kw}】，请发送回复内容'
-            f'发送 /结束添加 完成，/取消添加 取消')
+        yield event.plain_result(f'正在添加关键字【{kw}】，请发送回复内容，发送 /结束添加 完成，/取消添加 取消')
 
     @filter.command("添加全局")
     @filter.permission_type(filter.PermissionType.ADMIN)
@@ -295,16 +291,10 @@ class KeywordPlugin(Star):
 
             timeout_task = asyncio.create_task(self._start_session_timeout(uid))
             self.sessions[uid] = {
-                "kw": kw,
-                "scope": "global",
-                "target": "ALL",
-                "contents": [],
-                "hashes": [],
-                "last_time": time.time(),
-                "umo": event.unified_msg_origin,
-                "failed": False,
-                "pending_task": None,
-                "timeout_task": timeout_task,
+                "kw": kw, "scope": "global", "target": "ALL",
+                "contents": [], "hashes": [], "last_time": time.time(),
+                "umo": event.unified_msg_origin, "failed": False,
+                "pending_task": None, "timeout_task": timeout_task,
             }
             if not self.multi_user_adding:
                 self.adding_lock_user = uid
@@ -367,7 +357,6 @@ class KeywordPlugin(Star):
                     logger.error(f"保存关键字异常: {traceback.format_exc()}")
                     yield event.plain_result(f"保存失败: {str(e)}")
 
-            # 统一清理 session 及附属任务
             timeout_task = session.get("timeout_task")
             if timeout_task and not timeout_task.done():
                 timeout_task.cancel()
@@ -474,6 +463,55 @@ class KeywordPlugin(Star):
             txt += f"\n(发送 /全局关键字列表 {page + 1} 查看下一页)"
         yield event.plain_result(txt)
 
+    # [新增功能] 关键字搜索指令
+    @filter.command("搜索关键字")
+    async def cmd_search(self, event: AstrMessageEvent, keyword: str):
+        gid = event.message_obj.group_id
+        if gid and str(gid) not in [str(i) for i in self.config.get("whitelist_groups", [])]:
+            yield event.plain_result("本群未开启关键字功能")
+            return
+        is_group = bool(gid and str(gid).strip())
+        if is_group:
+            scope, target, label = "group", str(gid), f"群 {gid}"
+        else:
+            uid = str(event.message_obj.sender.user_id)
+            scope, target, label = "private", uid, "私聊"
+
+        kw = keyword.strip().lower()
+        if not kw:
+            yield event.plain_result("搜索内容不能为空")
+            return
+
+        loop = asyncio.get_running_loop()
+        rows = await loop.run_in_executor(None, self.db_h.search_keywords, scope, target, kw)
+        if not rows:
+            yield event.plain_result(f"在{label}中未找到包含【{keyword}】的关键字")
+            return
+
+        body = "\n".join(f"- {r['keyword']}" for r in rows)
+        yield event.plain_result(f"{label}搜索结果【{keyword}】:\n{body}")
+
+    @filter.command("搜索全局关键字")
+    async def cmd_search_global(self, event: AstrMessageEvent, keyword: str):
+        gid = event.message_obj.group_id
+        if gid and str(gid) not in [str(i) for i in self.config.get("whitelist_groups", [])]:
+            yield event.plain_result("本群未开启关键字功能")
+            return
+
+        kw = keyword.strip().lower()
+        if not kw:
+            yield event.plain_result("搜索内容不能为空")
+            return
+
+        loop = asyncio.get_running_loop()
+        rows = await loop.run_in_executor(None, self.db_h.search_global_keywords, kw)
+        if not rows:
+            yield event.plain_result(f"在全局库中未找到包含【{keyword}】的关键字")
+            return
+
+        body = "\n".join(f"- {r['keyword']} (创建者: {r['creator']})" for r in rows)
+        yield event.plain_result(f"全局搜索结果【{keyword}】:\n{body}")
+
     # ==================================================================
     # 二、核心事件监听
     # ==================================================================
@@ -541,23 +579,43 @@ class KeywordPlugin(Star):
 
         loop = asyncio.get_running_loop()
         kw_lower = clean_text.lower()
-        matched = False
 
+        to_send = []
         if gid and gid in [str(i) for i in self.config.get("global_whitelist_groups", [])]:
             g_match = await loop.run_in_executor(None, self.db_h.match_scope_keyword, kw_lower, "global", "ALL")
             if g_match:
-                await self._do_send(event, g_match)
-                matched = True
+                to_send.append(g_match)
 
         target = gid if gid else uid
         scope = "group" if gid else "private"
         l_match = await loop.run_in_executor(None, self.db_h.match_scope_keyword, kw_lower, scope, target)
         if l_match:
-            await self._do_send(event, l_match)
-            matched = True
+            to_send.append(l_match)
 
-        if matched:
-            event.stop_event()
+        if to_send:
+            # [新增功能] 触发冷却判断
+            is_cooling = False
+            if self.trigger_cooldown > 0:
+                now = time.time()
+                cool_key_g = f"{kw_lower}:global:ALL"
+                cool_key_l = f"{kw_lower}:{scope}:{target}"
+
+                if gid and gid in self.config.get("global_whitelist_groups", []):
+                    if now - self._last_trigger_time.get(cool_key_g, 0) < self.trigger_cooldown:
+                        is_cooling = True
+                    else:
+                        self._last_trigger_time[cool_key_g] = now
+
+                if not is_cooling:
+                    if now - self._last_trigger_time.get(cool_key_l, 0) < self.trigger_cooldown:
+                        is_cooling = True
+                    else:
+                        self._last_trigger_time[cool_key_l] = now
+
+            if not is_cooling:
+                for data in to_send:
+                    await self._do_send(event, data)
+                event.stop_event()
 
     # ==================================================================
     # 三、消息解析
@@ -853,7 +911,7 @@ class KeywordPlugin(Star):
         return result
 
     # ==================================================================
-    # 五、发送实现
+    # 五、发送实现 (重构支持收集 message_id)
     # ==================================================================
     async def _do_send(self, event: AstrMessageEvent, match_data: list):
         if not match_data:
@@ -882,23 +940,37 @@ class KeywordPlugin(Star):
             if need_safe_forward:
                 forward_blocks.extend(safe)
 
+            all_msg_ids = []
             first_sent = False
+
             if forward_blocks:
-                await self._send_via_forward(event, forward_blocks)
+                ids = await self._send_via_forward(event, forward_blocks)
+                all_msg_ids.extend(ids)
                 first_sent = True
+
             if not need_safe_forward:
                 for block in safe:
                     if first_sent:
                         await asyncio.sleep(random.uniform(1.0, 2.0))
-                    await self._send_via_normal(event, block)
+                    ids = await self._send_via_normal(event, block)
+                    all_msg_ids.extend(ids)
                     first_sent = True
+
             for block in unsafe:
                 if first_sent:
                     await asyncio.sleep(random.uniform(1.0, 2.0))
-                await self._send_via_normal(event, block)
+                ids = await self._send_via_normal(event, block)
+                all_msg_ids.extend(ids)
                 first_sent = True
 
-    async def _send_via_forward(self, event, blocks: list):
+            # [新增功能] 触发自动撤回
+            gid = event.get_group_id()
+            if gid and all_msg_ids:
+                delay = self.auto_delete_groups.get(str(gid))
+                if delay and 10 <= delay <= 90:
+                    asyncio.create_task(self._auto_delete_task(event.bot, all_msg_ids, delay))
+
+    async def _send_via_forward(self, event, blocks: list) -> list[int]:
         bot = event.bot
         api = bot.api
         bot_id, bot_name = self._bot_uid or "0", self._bot_name or "Bot"
@@ -936,30 +1008,46 @@ class KeywordPlugin(Star):
                         "data": {"uin": bot_id, "name": bot_name, "content": content},
                     })
         if not ob11_nodes:
-            return
+            return []
+
         gid = event.get_group_id()
         uid = event.get_sender_id()
         safe_gid = self._safe_int(gid)
         safe_uid = self._safe_int(uid)
+        msg_ids = []
+
         try:
-            await api.call_action(
+            res = await api.call_action(
                 "send_forward_msg",
                 message_type="group" if gid else "private",
                 group_id=safe_gid, user_id=safe_uid,
                 messages=ob11_nodes, prompt=bot_name,
             )
+            mid = self._extract_msg_id(res)
+            if mid is not None:
+                msg_ids.append(mid)
         except Exception as e:
             logger.warning(f"send_forward_msg 失败，尝试回退旧接口: {e}")
             try:
                 if safe_gid:
-                    await api.call_action("send_group_forward_msg", group_id=safe_gid, messages=ob11_nodes)
+                    res_fallback = await api.call_action("send_group_forward_msg", group_id=safe_gid,
+                                                         messages=ob11_nodes)
+                    mid = self._extract_msg_id(res_fallback)
+                    if mid is not None:
+                        msg_ids.append(mid)
                 elif safe_uid:
-                    await api.call_action("send_private_forward_msg", user_id=safe_uid, messages=ob11_nodes)
+                    res_fallback = await api.call_action("send_private_forward_msg", user_id=safe_uid,
+                                                         messages=ob11_nodes)
+                    mid = self._extract_msg_id(res_fallback)
+                    if mid is not None:
+                        msg_ids.append(mid)
             except Exception as e_fallback:
                 logger.error(f"合并转发回退发送也失败: {e_fallback}")
+        return msg_ids
 
-    async def _send_via_normal(self, event, block: list):
+    async def _send_via_normal(self, event, block: list) -> list[int]:
         has_mface = any(isinstance(i, dict) and i.get("type") == "mface" for i in block)
+        msg_ids = []
         if has_mface:
             try:
                 ob11_msg = self._segments_to_ob11(block)
@@ -975,11 +1063,14 @@ class KeywordPlugin(Star):
                     elif safe_uid:
                         params["user_id"] = safe_uid;
                         params["message_type"] = "private"
-                    await event.bot.api.call_action("send_msg", **params)
-                return
+                    res = await event.bot.api.call_action("send_msg", **params)
+                    mid = self._extract_msg_id(res)
+                    if mid is not None:
+                        msg_ids.append(mid)
+                return msg_ids
             except Exception as e:
                 logger.error(f"商城表情已过期或下架: {e}")
-                return
+                return msg_ids
 
         comps = self._to_comps(block)
         if comps:
@@ -987,6 +1078,34 @@ class KeywordPlugin(Star):
                 await self.context.send_message(event.unified_msg_origin, MessageChain(comps))
             except Exception as e:
                 logger.error(f"普通消息发送失败: {e}")
+        return msg_ids
+
+    @staticmethod
+    def _extract_msg_id(res: dict | None) -> int | None:
+        if not isinstance(res, dict):
+            return None
+        data = res.get("data")
+        if isinstance(data, dict):
+            mid = data.get("message_id")
+        else:
+            mid = res.get("message_id")
+        if mid is not None:
+            try:
+                return int(mid)
+            except (ValueError, TypeError):
+                pass
+        return None
+
+    # [新增功能] 自动撤回任务
+    async def _auto_delete_task(self, bot, msg_ids: list[int], delay: int):
+        await asyncio.sleep(delay)
+        for mid in msg_ids:
+            for _ in range(2):
+                try:
+                    await bot.api.call_action("delete_msg", message_id=mid)
+                    break
+                except Exception:
+                    await asyncio.sleep(1)
 
     def _segments_to_ob11(self, segments):
         result = []

@@ -15,12 +15,10 @@ class DBHandler:
     def _init_db(self, enable_wal: bool):
         with self._lock:
             with self.conn:
-                # H-004: 增加配置控制，修复潜在的NFS兼容问题
                 if enable_wal:
                     self.conn.execute("PRAGMA journal_mode=WAL")
                 else:
                     self.conn.execute("PRAGMA journal_mode=DELETE")
-
                 self.conn.execute("PRAGMA synchronous=NORMAL")
                 self.conn.execute("PRAGMA busy_timeout=5000")
 
@@ -73,7 +71,6 @@ class DBHandler:
                 )
                 if cursor.rowcount == 0:
                     return False
-
                 kw_id = cursor.lastrowid
                 for h in set(hashes):
                     self.conn.execute(
@@ -88,11 +85,9 @@ class DBHandler:
     def match_scope_keyword(self, kw, scope, target):
         with self._lock:
             t_str = str(target).strip()
-            # M-001 修复：去除 CAST，利用索引加速查询
             row = self.conn.execute(
                 "SELECT content_json FROM keywords "
-                "WHERE keyword=? AND scope=? AND target_id=?",
-                (kw.lower(), scope, t_str)
+                "WHERE keyword=? AND scope=? AND target_id=?", (kw.lower(), scope, t_str)
             ).fetchone()
             if not row:
                 return None
@@ -108,20 +103,17 @@ class DBHandler:
             return False
         with self._lock:
             with self.conn:
-                # M-001 修复：去除 CAST
                 row = self.conn.execute(
                     "SELECT id FROM keywords "
-                    "WHERE keyword=? AND scope=? AND target_id=?",
-                    (kw.lower(), scope, t_str)
+                    "WHERE keyword=? AND scope=? AND target_id=?", (kw.lower(), scope, t_str)
                 ).fetchone()
                 if not row:
                     return False
                 kid = row['id']
-                hashes = [
-                    r['media_hash'] for r in self.conn.execute(
-                        "SELECT media_hash FROM keyword_media WHERE kw_id=?", (kid,)
-                    ).fetchall()
-                ]
+                hashes = [r['media_hash'] for r in self.conn.execute(
+                    "SELECT media_hash FROM keyword_media WHERE kw_id=?", (kid,)
+                ).fetchall()]
+
                 for h in hashes:
                     self.conn.execute("UPDATE media_files SET ref_count = ref_count - 1 WHERE hash=?", (h,))
                     self.conn.execute(
@@ -158,8 +150,23 @@ class DBHandler:
             offset = (max(1, page) - 1) * 10
             return self.conn.execute(
                 "SELECT keyword, creator FROM keywords "
-                "WHERE scope='global' ORDER BY id DESC LIMIT 10 OFFSET ?",
-                (offset,)
+                "WHERE scope='global' ORDER BY id DESC LIMIT 10 OFFSET ?", (offset,)
+            ).fetchall()
+
+    def search_keywords(self, scope, target, keyword):
+        with self._lock:
+            return self.conn.execute(
+                "SELECT keyword FROM keywords "
+                "WHERE scope=? AND target_id=? AND keyword LIKE ? ORDER BY id DESC LIMIT 10",
+                (scope, str(target), f"%{keyword}%")
+            ).fetchall()
+
+    def search_global_keywords(self, keyword):
+        with self._lock:
+            return self.conn.execute(
+                "SELECT keyword, creator FROM keywords "
+                "WHERE scope='global' AND keyword LIKE ? ORDER BY id DESC LIMIT 10",
+                (f"%{keyword}%",)
             ).fetchall()
 
     def get_media_path(self, file_hash: str):
