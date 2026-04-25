@@ -42,12 +42,20 @@
     "min": 0,
     "max": 60
   },
-  "auto_delete_groups": {
-    "type": "dict",
-    "description": "按群组配置自动撤回（秒）",
-    "hint": "配置特定群号及撤回延迟时间。例如 {\"123456\": 30, \"789012\": 60}。无论是普通消息还是合并转发都会尝试撤回。不在字典内的群不撤回，私聊绝不撤回。",
-    "default": {},
-    "items": {}
+  "auto_delete_whitelist": {
+    "type": "list",
+    "description": "自动撤回消息的群组白名单",
+    "hint": "在此列表中的群组，Bot回复的消息（包括合并转发）将在下方设置的秒数后尝试自动撤回。私聊绝不撤回。多个群号用逗号分隔。",
+    "items": { "type": "int" },
+    "default": []
+  },
+  "auto_delete_delay": {
+    "type": "int",
+    "description": "自动撤回延迟时间（秒）",
+    "hint": "在上方白名单群中，Bot回复消息后延迟多少秒执行撤回。建议范围 10-90 秒，过短可能导致用户看不全，过长可能超过撤回时限。",
+    "default": 30,
+    "min": 10,
+    "max": 90
   },
   "max_keywords_per_scope": {
     "type": "int",

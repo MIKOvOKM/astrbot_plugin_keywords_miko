@@ -71,16 +71,8 @@ class KeywordPlugin(Star):
         self._last_trigger_time: dict[str, float] = {}
 
         # [新增] 自动撤回
-        raw_del = self.config.get("auto_delete_groups", {})
-        self.auto_delete_groups: dict[str, int] = {}
-        if isinstance(raw_del, dict):
-            for k, v in raw_del.items():
-                try:
-                    delay = int(v)
-                    if 10 <= delay <= 90:
-                        self.auto_delete_groups[str(k)] = delay
-                except (ValueError, TypeError):
-                    pass
+        self.auto_delete_whitelist: set[str] = set(str(g) for g in self.config.get("auto_delete_whitelist", []))
+        self.auto_delete_delay: int = max(10, min(90, int(self.config.get("auto_delete_delay", 30))))
 
         self.user_task_locks: dict[str, asyncio.Lock] = {}
         self._session_lock = asyncio.Lock()
@@ -974,10 +966,8 @@ class KeywordPlugin(Star):
 
             # [新增功能] 触发自动撤回
             gid = event.get_group_id()
-            if gid and all_msg_ids:
-                delay = self.auto_delete_groups.get(str(gid))
-                if delay and 10 <= delay <= 90:
-                    asyncio.create_task(self._auto_delete_task(event.bot, all_msg_ids, delay))
+            if gid and all_msg_ids and str(gid) in self.auto_delete_whitelist:
+                asyncio.create_task(self._auto_delete_task(event.bot, all_msg_ids, self.auto_delete_delay))
 
     async def _send_via_forward(self, event, blocks: list) -> list[int]:
         bot = event.bot
